@@ -2,28 +2,45 @@
 
 A Matrix look for Claude Code.
 
-- Every message you send and every reply from Claude arrives as green glyph
-  noise in the message's own shape, then decodes: each character burns white
-  and locks in, in a rippling left-to-right sweep (about two seconds). Replies
-  then settle into the normal formatted text.
+- Every message you send arrives as glyph noise in its own shape. Then each
+  letter burns white and locks in, in a sweep from left to right (about two
+  seconds). Claude's replies decode the same way inside their normal
+  formatting, so nothing jumps when they finish.
 - Green code rain falls in a band above the prompt. While Claude works it
-  pours, with white-hot heads, fading trails and flickering glyphs; while idle
-  it drizzles and "Wake up, Neo...", "The Matrix has you..." and friends type
-  themselves into it. In the desktop app the band is an animated SVG monitor
-  with glow, scanlines and a vignette.
+  pours, with white-hot heads, fading trails and flickering glyphs. While idle
+  it drizzles, and "Wake up, Neo...", "The Matrix has you..." and friends type
+  themselves into it. In the desktop app, move the pointer through the rain to
+  part it, and click to send a ring of light through it.
 - While a tool runs, the status line reads "◢ tracing Bash ｱﾂ" and the band
   shows "◢ TRACE  Bash". A tool that runs past four seconds drops the band
-  into bullet time: the rain crawls, ripples spread from the readout, and the
-  spinner says "Dodging bullets".
+  into bullet time: the rain crawls and the spinner says "Dodging bullets".
 - When a tool fails, the Matrix glitches: for a couple of seconds the rain
   turns red and "Déjà vu." shudders in the band.
+- Tool rows read as green trace lines: `◢ Bash › npm test`, red when a call
+  failed. Rows whose body matters (edits, checklists, questions) keep their
+  normal look.
+- Subagents are Agent Smiths: announced when deployed, named on their
+  spinners, and traced as `SMITH › Bash`.
+- After each turn the status line says how it went ("◢ Jacked out after
+  12s"). Then the Operator radios in a one-line report that a small model writes.
 - `/construct` opens the Construct: a pane with a tall wall of rain over an
-  operator console (calls traced, glitches, bullet times, most-traced tools).
+  operator console (calls traced, glitches, bullet times, Agent Smiths,
+  most-traced tools).
 - The footer's mode labels gain "◢ matrix" while the look is on.
 
-`/matrix` offers the red pill and the blue pill in the band above the prompt
-(click, or press 1 or 2); `/matrix red` and `/matrix blue` choose at once. The
-choice is remembered.
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `/matrix` | Offers the red pill (on) and the blue pill (off) in the band above the prompt: click, or press 1 or 2 |
+| `/matrix red`, `/matrix blue` | Choose at once |
+| `/matrix morpheus [on\|off]` | Claude answers in the voice of Morpheus (off by default) |
+| `/matrix operator [on\|off]` | The Operator's one-line report after each turn (on by default; one small model call per turn) |
+| `/matrix rows [on\|off]` | Tool rows as green trace lines (on by default) |
+| `/matrix help` | Lists these |
+| `/construct` | Opens the operator console |
+
+The plugin remembers every choice across sessions.
 
 ## Install
 
@@ -44,9 +61,9 @@ The code rain is drawn in the terminal and in the desktop app; the editor
 extensions and mobile get the decoding messages and the rest.
 
 Tune it: colors, speeds and glyphs are constants at the top of
-`hooks/register.tsx`. DECODE_FRAMES sets how long a message takes to decode,
-BULLET_FRAMES how long a tool runs before bullet time, PHRASES what types into
-the rain and TRAIL the trail's colors.
+`hooks/register.tsx` and `hooks/rain-core.ts`. DECODE_FRAMES sets how long a
+message takes to decode. BULLET_FRAMES sets how long a tool runs before bullet
+time. PHRASES sets what types into the rain, and TRAIL sets the trail's colors.
 
 ## License
 

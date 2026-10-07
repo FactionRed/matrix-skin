@@ -5,6 +5,8 @@ export type MatrixStats = {
   calls: number
   failures: number
   bulletTimes: number
+  /** Subagents deployed this session: Agent Smiths. Absent in a session older than the count. */
+  smiths?: number
   /** Calls per tool name. */
   tools: Record<string, number>
 }
@@ -23,6 +25,14 @@ declare module 'claude-code' {
       /** True while the band offers the red and blue pills. */
       isChoosing: boolean
       stats: MatrixStats
+      /** The subagents running now, by agentId: the Agent Smiths. */
+      smithIds: string[]
+      /** Claude answers in the voice of Morpheus. */
+      isMorpheus: boolean
+      /** A one-line operator report after each turn. */
+      isOperator: boolean
+      /** Tool rows drawn as green trace lines. */
+      isThemedRows: boolean
     }
   }
 }
