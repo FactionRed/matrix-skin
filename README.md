@@ -2,6 +2,8 @@
 
 A Matrix look for Claude Code.
 
+![The rain band, a tool trace, bullet time and a déjà vu glitch in the Claude Code desktop app](docs/demo.gif)
+
 - Every message you send arrives as glyph noise in its own shape. Then each
   letter burns white and locks in, in a sweep from left to right (about two
   seconds). Claude's replies decode the same way inside their normal
