@@ -9,7 +9,7 @@
       "name": "matrix-skin",
       "source": "./",
       "description": "A Matrix look for Claude Code: green code rain above the prompt, messages that decode out of glyph noise, déjà vu glitches, bullet time and the Construct.",
-      "version": "1.3.2",
+      "version": "1.3.3",
       "author": {
         "name": "DoomLord"
       }
