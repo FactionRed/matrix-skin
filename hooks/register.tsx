@@ -476,17 +476,9 @@ async function shouldAnimate($: EngineInterface, requestId: string) {
 // The engine has no clip player or synthesizer on Windows, so there the
 // plugin hands its WAV files to Windows' own SoundPlayer and speaks with
 // Windows' own voice, through PowerShell.
-const host: { isWindows?: boolean } = {}
 async function isWindows($: EngineInterface) {
-  if (host.isWindows === undefined) {
-    try {
-      const os = await $.env.get('OS')
-      host.isWindows = os === 'Windows_NT'
-    } catch {
-      host.isWindows = false
-    }
-  }
-  return host.isWindows
+  const os = await $.env.get('OS')
+  return os === 'Windows_NT'
 }
 
 /** Plays one of the plugin's clips while the look and sound are on; silent where nothing can play it. */
@@ -956,9 +948,9 @@ export const register: Register = on => {
     if (e.surface !== 'desktop') return next(e)
     // A Client region keeps animating across redraws, where an SVG frame was
     // rebuilt (and blinked) every time the band drew again.
-    const { Client } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
 
-    return Client({ key: 'rain', module: './rain-client.tsx', props: { rows: BAND_ROWS, isWorking: e.props.isWorking, overlay }, width: '100%', height: BAND_ROWS })
+    return elements.Client({ module: './rain-client.tsx', key: 'rain', props: { rows: BAND_ROWS, isWorking: e.props.isWorking, overlay }, width: '100%', height: BAND_ROWS })
   })
 
   // The Construct: a wall of rain filling the pane, the operator's readout
@@ -973,8 +965,8 @@ export const register: Register = on => {
     const data = await constructData($, overlay, rows)
 
     if (e.surface === 'desktop') {
-      const { Client } = $.ui.resolve(e)
-      return Client({ key: 'construct-rain', module: './rain-client.tsx', props: { rows, isWorking: true, overlay, construct: data }, width: '100%', height: rows })
+      const elements = $.ui.resolve(e)
+      return elements.Client({ module: './rain-client.tsx', key: 'construct-rain', props: { rows, isWorking: true, overlay, construct: data }, width: '100%', height: rows })
     }
     // Only the desktop opens a trace line: elsewhere its detail stays out of the readout.
     const closed = { ...data, trace: data.trace.map(t => ({ ...t, detail: undefined })) }
