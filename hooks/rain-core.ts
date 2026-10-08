@@ -51,8 +51,8 @@ export type Ripple = Point & { age: number }
 /** The pointer over a Client region, the ripples its clicks sent, and how far the boot sequence has run. */
 export type Field = { pointer?: Point | null; ripples?: Ripple[]; bootFrames?: number }
 
-/** One frame of rain: a code point and a color (`-1`, the default) per cell, row-major. */
-export type Grid = { columns: number; rows: number; cp: Uint32Array; fg: Int32Array }
+/** One frame of rain: a code point, a color and a background (`-1`, the default) per cell, row-major. */
+export type Grid = { columns: number; rows: number; cp: Uint32Array; fg: Int32Array; bg: Int32Array }
 
 /**
  * How many frames a drop takes to fall one step: every frame while Claude
@@ -81,6 +81,7 @@ export const rainGrid = (columns: number, rows: number, t: number, f = 0, isWork
   const pal = overlay.isGlitching ? GLITCH_HEX : TRAIL_HEX
   const cp = new Uint32Array(columns * rows).fill(0x20)
   const fg = new Int32Array(columns * rows).fill(-1)
+  const bg = new Int32Array(columns * rows).fill(-1)
   const set = (x: number, y: number, ch: string, color: number) => {
     if (x < 0 || y < 0 || x >= columns || y >= rows) return
     cp[y * columns + x] = ch.codePointAt(0)!
@@ -89,7 +90,7 @@ export const rainGrid = (columns: number, rows: number, t: number, f = 0, isWork
 
   if (overlay.isBooting) {
     bootScreen(columns, rows, Math.max(0, field.bootFrames ?? 0), f, set)
-    return { columns, rows, cp, fg }
+    return { columns, rows, cp, fg, bg }
   }
 
   const alphabet = overlay.smith ? SMITH : GLYPHS
@@ -184,7 +185,7 @@ export const rainGrid = (columns: number, rows: number, t: number, f = 0, isWork
     if (!isFading && Math.floor(f / 4) % 2 === 0) set(start + typed, mid, '█', TRAIL_HEX[2]!)
   }
 
-  return { columns, rows, cp, fg }
+  return { columns, rows, cp, fg, bg }
 }
 
 /**
@@ -214,23 +215,82 @@ const bootScreen = (columns: number, rows: number, b: number, f: number, set: (x
 }
 
 /**
- * A grid row as cells to lay out one per column: each glyph alone in its cell,
- * and each run of blanks as one span. A proportional font (the desktop's)
- * sets glyphs at their own widths, so only a cell per glyph keeps the columns
- * of rain straight and the row as wide as the region.
+ * Keeps at most `budget` glyphs of rain outside the text regions, dropping the
+ * dimmest first: every drawn glyph is a node the surface serializes each
+ * frame, and a tree past its bounds is not drawn at all.
  */
-export const spansOf = (grid: Grid, y: number) => {
-  const spans: ({ ch: string; color: string; span: 1 } | { ch?: undefined; color?: undefined; span: number })[] = []
-  for (let x = 0; x < grid.columns; x++) {
-    const i = y * grid.columns + x
-    const last = spans[spans.length - 1]
-    if (grid.cp[i] === 0x20 || grid.fg[i]! < 0) {
-      if (last && last.ch === undefined) last.span += 1
-      else spans.push({ span: 1 })
-    } else {
-      const color = COLOR_NAME.get(grid.fg[i]!) ?? `#${grid.fg[i]!.toString(16).padStart(6, '0')}`
-      spans.push({ ch: String.fromCodePoint(grid.cp[i]!), color, span: 1 })
+export const thinRain = (grid: Grid, budget: number, regions: Map<number, Region[]> = new Map()) => {
+  const inText = (x: number, y: number) => (regions.get(y) ?? []).some(r => x >= r.x && x < r.x + r.width)
+  const glyphs: { i: number; light: number }[] = []
+  for (let y = 0; y < grid.rows; y++) {
+    for (let x = 0; x < grid.columns; x++) {
+      const i = y * grid.columns + x
+      if (grid.cp[i] === 0x20 || grid.fg[i]! < 0 || inText(x, y)) continue
+      const c = grid.fg[i]!
+      glyphs.push({ i, light: Math.max((c >> 16) & 0xff, (c >> 8) & 0xff) })
     }
   }
-  return spans
+  if (glyphs.length <= budget) return
+  glyphs.sort((a, b) => a.light - b.light)
+  for (const { i } of glyphs.slice(0, glyphs.length - budget)) {
+    grid.cp[i] = 0x20
+    grid.fg[i] = -1
+  }
 }
+
+/** A palette color, or any other, as the `#rrggbb` string Text takes. */
+export const colorName = (color: number) => COLOR_NAME.get(color) ?? `#${color.toString(16).padStart(6, '0')}`
+
+/** A stretch of a row that holds text: drawn as one block, its cells kept together. */
+export type Region = { x: number; width: number }
+
+/** One part of a laid-out row: a glyph in its own cell, a run of blanks, or a block of text. */
+export type RowPart =
+  | { kind: 'cell'; ch: string; color: string }
+  | { kind: 'gap'; span: number }
+  | { kind: 'text'; width: number; runs: { text: string; color?: string; bg?: string }[] }
+
+/**
+ * A grid row as parts to lay out left to right. Each glyph of rain sits alone
+ * in its cell and each run of blanks is one span: a proportional font (the
+ * desktop's) sets glyphs at their own widths, so only a cell per glyph keeps
+ * the columns of rain straight and the row as wide as the region. A region of
+ * text is one block of colored runs, so a line of readout stays one line.
+ */
+export const rowParts = (grid: Grid, y: number, regions: Region[] = []) => {
+  const parts: RowPart[] = []
+  const sorted = [...regions].sort((a, b) => a.x - b.x)
+  let x = 0
+  for (const region of [...sorted, { x: grid.columns, width: 0 }]) {
+    for (; x < Math.min(region.x, grid.columns); x++) {
+      const i = y * grid.columns + x
+      const last = parts[parts.length - 1]
+      if (grid.cp[i] === 0x20 || grid.fg[i]! < 0) {
+        if (last?.kind === 'gap') last.span += 1
+        else parts.push({ kind: 'gap', span: 1 })
+      } else {
+        parts.push({ kind: 'cell', ch: String.fromCodePoint(grid.cp[i]!), color: colorName(grid.fg[i]!) })
+      }
+    }
+    const end = Math.min(grid.columns, region.x + region.width)
+    if (x >= end) continue
+    const runs: { text: string; color?: string; bg?: string }[] = []
+    for (; x < end; x++) {
+      const i = y * grid.columns + x
+      const color = grid.fg[i]! < 0 ? undefined : colorName(grid.fg[i]!)
+      const bg = grid.bg[i]! < 0 ? undefined : colorName(grid.bg[i]!)
+      const ch = String.fromCodePoint(grid.cp[i]!)
+      const last = runs[runs.length - 1]
+      if (last && last.color === color && last.bg === bg) last.text += ch
+      else runs.push({ text: ch, color, bg })
+    }
+    parts.push({ kind: 'text', width: end - region.x, runs })
+  }
+  return parts
+}
+
+/** A rain row with no text in it, as cells and spans of blanks. */
+export const spansOf = (grid: Grid, y: number) =>
+  rowParts(grid, y).map(part =>
+    part.kind === 'cell' ? { ch: part.ch, color: part.color, span: 1 as const } : { ch: undefined, color: undefined, span: part.kind === 'gap' ? part.span : 0 },
+  )

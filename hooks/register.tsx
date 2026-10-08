@@ -1,9 +1,11 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { MatrixStats } from '../types'
-import { BOOT_FRAMES, DEJA_VU, GLITCH_TRAIL, KATAKANA, RAIN_MS, TRAIL, crawlOf, glyph, hash, rainGrid } from './rain-core'
-import type { Field, Overlay } from './rain-core'
+import type { MatrixSmith, MatrixStats, MatrixTraceEntry } from '../types'
+import { constructControls, layoutConstruct, paintConstruct } from './construct-core'
+import type { ConstructAction, ConstructData, DecodeMemory } from './construct-core'
+import { BOOT_FRAMES, DEJA_VU, GLITCH_TRAIL, KATAKANA, RAIN_MS, TRAIL, colorName, crawlOf, glyph, hash, rainGrid } from './rain-core'
+import type { Field, Grid, Overlay } from './rain-core'
 
 // Palette: phosphor greens on the terminal's own background.
 const GREEN = TRAIL[2]!
@@ -32,7 +34,9 @@ const ANDERSON_GAP_MS = 10 * 60_000 // "Mr. Anderson..." at most once in ten min
 
 const CONSTRUCT = 'matrix-construct'
 const BAND_ROWS = 3 // the band's rain, in rows
-const CONSTRUCT_ROWS = 12 // the Construct's wall of rain, in rows
+const CONSTRUCT_ROWS = 12 // the least rain the Construct shows, in rows
+const TRACE_KEEP = 40 // tool calls the trace log keeps
+const SMITH_KEEP_MS = 60_000 // how long a finished Agent Smith stays on the roster
 
 /**
  * Tool rows drawn as green trace lines, and the one line each shows. Tools not
@@ -76,7 +80,8 @@ const isGlitching = atom({ plugin: 'matrix-skin', key: 'isGlitching' } as const,
 const trace = atom({ plugin: 'matrix-skin', key: 'trace' } as const, '')
 const isBulletTime = atom({ plugin: 'matrix-skin', key: 'isBulletTime' } as const, false)
 const isChoosing = atom({ plugin: 'matrix-skin', key: 'isChoosing' } as const, false)
-const smithIds = atom({ plugin: 'matrix-skin', key: 'smithIds' } as const, [] as string[])
+const traceLog = atom({ plugin: 'matrix-skin', key: 'traceLog' } as const, [] as MatrixTraceEntry[])
+const smithRoster = atom({ plugin: 'matrix-skin', key: 'smithRoster' } as const, [] as MatrixSmith[])
 const isBooting = atom({ plugin: 'matrix-skin', key: 'isBooting' } as const, false)
 const smithAnnounce = atom({ plugin: 'matrix-skin', key: 'smithAnnounce' } as const, '')
 const isMorpheus = atom({ plugin: 'matrix-skin', key: 'isMorpheus' } as const, false)
@@ -204,17 +209,20 @@ const toBase64 = (bytes: Uint8Array) => {
 
 const DEFAULT = 0x01000000
 
-/** One frame of code rain, as the terminal's Raster cells. */
-export const rain = (columns: number, rows: number, t: number, f = 0, isWorking = true, overlay: Overlay = {}, field: Field = {}) => {
-  const grid = rainGrid(columns, rows, t, f, isWorking, overlay, field)
-  const words = new Uint32Array(columns * rows * 3)
-  for (let i = 0, j = 0; i < columns * rows; i++, j += 3) {
+/** A grid as the terminal's Raster cells. */
+const cellsOf = (grid: Grid) => {
+  const words = new Uint32Array(grid.columns * grid.rows * 3)
+  for (let i = 0, j = 0; i < grid.columns * grid.rows; i++, j += 3) {
     words[j] = grid.cp[i]!
     words[j + 1] = grid.fg[i]! < 0 ? DEFAULT : grid.fg[i]!
-    words[j + 2] = DEFAULT
+    words[j + 2] = grid.bg[i]! < 0 ? DEFAULT : grid.bg[i]!
   }
   return toBase64(new Uint8Array(words.buffer))
 }
+
+/** One frame of code rain, as the terminal's Raster cells. */
+export const rain = (columns: number, rows: number, t: number, f = 0, isWorking = true, overlay: Overlay = {}, field: Field = {}) =>
+  cellsOf(rainGrid(columns, rows, t, f, isWorking, overlay, field))
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
@@ -288,13 +296,43 @@ export const toolSummary = (tool: string, input: unknown) => {
   return (SUMMARY[tool]?.(first) ?? '').split('\n')[0]!.slice(0, 160)
 }
 
+/** A tool call's line in the trace log: its summary, else its first text argument. */
+const traceSummary = (tool: string, input: Record<string, unknown>) => {
+  const fallback = Object.entries(input).find(([k, v]) => typeof v === 'string' && v && !['tool', 'tool_use_id', 'agentId'].includes(k))
+  return (toolSummary(tool, input) || String(fallback?.[1] ?? '')).split('\n')[0]!.slice(0, 160)
+}
+
 /** A terminal site whose Raster the rain timer repaints: the band or the Construct. */
-type RainSite = { key: string; id: string; columns: number; rows: number; isWorking: boolean; t: number; f: number; overlay: Overlay; bootF?: number }
+type RainSite = {
+  key: string
+  id: string
+  columns: number
+  rows: number
+  isWorking: boolean
+  t: number
+  f: number
+  overlay: Overlay
+  bootF?: number
+  /** The Construct's readout, the frame it arrived on, and its decode memory. */
+  data?: ConstructData
+  dataF?: number
+  memory?: DecodeMemory
+}
 
 /** A site's boot frames so far, starting the count when its overlay starts booting. */
 const bootField = (site: RainSite): Field => {
   site.bootF = site.overlay.isBooting ? (site.bootF ?? site.f) : undefined
   return { bootFrames: site.bootF === undefined ? 0 : site.f - site.bootF }
+}
+
+/** The Construct's Raster: its rain, with the readout decoding into it. */
+const constructCells = (site: RainSite) => {
+  const grid = rainGrid(site.columns, site.rows, site.t, site.f, true, site.overlay, bootField(site))
+  if (site.data && !site.overlay.isBooting) {
+    const now = site.data.now + (site.f - (site.dataF ?? site.f)) * RAIN_MS
+    paintConstruct(grid, layoutConstruct(site.columns, site.rows, site.data, now), site.f, (site.memory ??= new Map()))
+  }
+  return cellsOf(grid)
 }
 
 const clockState = { loadedAt: 0 }
@@ -402,6 +440,47 @@ async function readOverlay($: EngineInterface): Promise<Overlay> {
   return { trace: traced, isGlitching: glitching, isBulletTime: bulletTime, isBooting: booting, smith }
 }
 
+/** Everything the Construct's readout shows, gathered from state. */
+async function constructData($: EngineInterface, overlay: Overlay): Promise<ConstructData> {
+  const [now, s, log, roster, lookOn, sound, voice, rows, operator, morpheus] = await Promise.all([
+    $.clock.now(),
+    read($, stats),
+    read($, traceLog),
+    read($, smithRoster),
+    read($, isOn),
+    read($, isSound),
+    read($, isVoice),
+    read($, isThemedRows),
+    read($, isOperator),
+    read($, isMorpheus),
+  ])
+  const running = roster.filter(r => r.doneAt === undefined).length
+  const status: ConstructData['status'] = overlay.isGlitching
+    ? { text: 'GLITCH: déjà vu. They changed something.', tone: 'glitch' }
+    : overlay.isBulletTime
+    ? { text: `BULLET TIME: ${overlay.trace} is taking its time`, tone: 'bullet' }
+    : running > 0
+    ? { text: `${running} AGENT SMITH${running === 1 ? '' : 'S'} IN THE MATRIX`, tone: 'smith' }
+    : overlay.trace
+    ? { text: `TRACING ${overlay.trace}`, tone: 'trace' }
+    : { text: 'OPERATOR STANDING BY', tone: 'calm' }
+
+  return {
+    now,
+    status,
+    stats: { calls: s.calls, failures: s.failures, bulletTimes: s.bulletTimes, smiths: s.smiths ?? 0 },
+    trace: log,
+    smiths: roster.filter(r => r.doneAt === undefined || now - r.doneAt < SMITH_KEEP_MS),
+    switches: { isOn: lookOn, sound, voice, rows, operator, morpheus },
+  }
+}
+
+/** What a Construct control does: flip its switch, or take its pill. */
+async function act($: EngineInterface, action: ConstructAction) {
+  if ('pill' in action) await choose($, action.pill)
+  else await flip($, action.toggle, '')
+}
+
 /** The one writer of the status line: the running tool's trace, else how the last turn went. */
 function renderStatus($: EngineInterface) {
   const line = tools.running > 0 ? statusLine.trace : [statusLine.done, statusLine.operator].filter(Boolean).join(' · ')
@@ -479,7 +558,8 @@ export const register: Register = on => {
       update($, isGlitching, () => false),
       update($, isBulletTime, () => false),
       update($, trace, () => ''),
-      update($, smithIds, () => []),
+      update($, smithRoster, () => []),
+      update($, traceLog, log => log.filter(t => t.ok !== undefined)), // calls cut short by the reload
       update($, smithAnnounce, () => ''),
       // Every session opens with the jack-in sequence while the look is on.
       update($, isBooting, () => saved !== false),
@@ -509,7 +589,8 @@ export const register: Register = on => {
         if (!site.id) continue
         site.f += 1
         if (site.f % crawlOf(site.isWorking, site.overlay) === 0) site.t += 1
-        void $.ui.blit({ requestId: site.id, key: site.key, cells: rain(site.columns, site.rows, site.t, site.f, site.isWorking, site.overlay, bootField(site)) })
+        const cells = site === construct ? constructCells(site) : rain(site.columns, site.rows, site.t, site.f, site.isWorking, site.overlay, bootField(site))
+        void $.ui.blit({ requestId: site.id, key: site.key, cells })
       }
     })
 
@@ -585,8 +666,8 @@ export const register: Register = on => {
   // The spinner: Matrix words for the main loop; a subagent's is an Agent Smith.
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
     if (!(await read($, isOn)) || e.props.message !== null) return next(e)
-    const [smiths, bulletTime] = await Promise.all([read($, smithIds), read($, isBulletTime)])
-    const word = smiths.includes(e.requestId) ? `Agent Smith · ${e.props.word}`
+    const [roster, bulletTime] = await Promise.all([read($, smithRoster), read($, isBulletTime)])
+    const word = roster.some(r => r.id === e.requestId && r.doneAt === undefined) ? `Agent Smith · ${e.props.word}`
       : bulletTime ? 'Dodging bullets'
       : pick(SPINNER_WORDS, e.props.word)
 
@@ -646,61 +727,66 @@ export const register: Register = on => {
     return <Client key="rain" module="./rain-client.tsx" props={{ rows: BAND_ROWS, isWorking: e.props.isWorking, overlay }} width="100%" height={BAND_ROWS} />
   })
 
-  // The Construct: a wall of rain over an operator's readout of the session.
+  // The Construct: a wall of rain filling the pane, the operator's readout
+  // decoding inside it, and controls a click (or a key, on the terminal) flips.
   on('ui.render', { component: 'Pane', requestId: CONSTRUCT }, async ($, e) => {
     construct.id = '' // set again below while a terminal Raster shows
-    const { Box, Text } = $.ui.resolve(e)
-    const [s, smiths, overlay] = await Promise.all([read($, stats), read($, smithIds), readOverlay($)])
-    const top = Object.entries(s.tools).sort((a, b) => b[1] - a[1]).slice(0, 5)
-    const status = overlay.isGlitching
-      ? { text: 'GLITCH: déjà vu. They changed something.', color: RED }
-      : overlay.isBulletTime
-      ? { text: `BULLET TIME: ${overlay.trace} is taking its time`, color: HEAD }
-      : smiths.length > 0
-      ? { text: `${smiths.length} Agent Smith${smiths.length === 1 ? '' : 's'} in the Matrix`, color: HEAD }
-      : overlay.trace
-      ? { text: `TRACING ${overlay.trace}`, color: GREEN }
-      : { text: 'Operator standing by.', color: DARK }
+    const overlay = await readOverlay($)
+    const data = await constructData($, overlay)
+    const rows = Math.max(CONSTRUCT_ROWS, Math.min(80, (e.viewport?.rows ?? 40) - 2))
 
-    let screen
+    if (e.surface === 'desktop') {
+      const { Client } = $.ui.resolve(e)
+      return <Client key="construct-rain" module="./rain-client.tsx" props={{ rows, isWorking: true, overlay, construct: data }} width="100%" height={rows} />
+    }
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const controls = (
+      <Box flexDirection="row" flexWrap="wrap" gap={1}>
+        {constructControls(data).map((control, i) => (
+          <Button key={`control-${i}`} hotkey={String(i + 1)} plain onPress={() => void act($, control.action)}>{control.label}</Button>
+        ))}
+      </Box>
+    )
     if (e.surface === 'terminal') {
       const { Raster } = $.ui.resolve(e)
       Object.assign(construct, {
         id: e.requestId,
         overlay,
         columns: Math.min(512, Math.max(1, e.props.bodyColumns)),
-        rows: Math.max(3, Math.min(CONSTRUCT_ROWS, (e.viewport?.rows ?? 24) - 12)),
+        rows: rows - 2,
+        dataF: construct.data?.now === data.now ? construct.dataF : construct.f,
+        data,
       })
-      screen = <Raster key="construct-rain" columns={construct.columns} rows={construct.rows} cells={rain(construct.columns, construct.rows, construct.t, construct.f, true, overlay, bootField(construct))} />
-    } else if (e.surface === 'desktop') {
-      const { Client } = $.ui.resolve(e)
-      screen = <Client key="construct-rain" module="./rain-client.tsx" props={{ rows: CONSTRUCT_ROWS, isWorking: true, overlay }} width="100%" height={CONSTRUCT_ROWS} />
-    } else {
-      const { Svg } = $.ui.resolve(e)
-      screen = <Svg source={rainSvg(1600, 220, overlay)} alt="The Construct: a wall of green code rain" height={220} isInteractive />
+
+      return (
+        <Box flexDirection="column">
+          <Raster key="construct-rain" columns={construct.columns} rows={construct.rows} cells={constructCells(construct)} />
+          {controls}
+        </Box>
+      )
     }
+    // The editor and mobile: rain as an SVG, and the readout as plain lines under it.
+    const { Svg } = $.ui.resolve(e)
 
     return (
       <Box flexDirection="column">
-        {screen}
-        <Box flexDirection="column" paddingX={1} marginTop={1}>
-          <Text color={GREEN} bold>◢ OPERATOR CONSOLE</Text>
-          <Text color={status.color}>{status.text}</Text>
-          {e.surface === 'desktop' ? <Text color={DARK}>Move the pointer through the rain; click to send a ripple.</Text> : null}
-          <Text color={DARK}>{'─'.repeat(Math.max(8, Math.min(40, (e.props.bodyColumns ?? 40) - 2)))}</Text>
-          <Text color={GREEN}>Calls traced    <Text color={HEAD} bold>{String(s.calls)}</Text></Text>
-          <Text color={GREEN}>Glitches        <Text color={s.failures > 0 ? RED : HEAD} bold>{String(s.failures)}</Text></Text>
-          <Text color={GREEN}>Bullet time     <Text color={HEAD} bold>{String(s.bulletTimes)}</Text></Text>
-          <Text color={GREEN}>Agent Smiths    <Text color={HEAD} bold>{String(s.smiths ?? 0)}</Text></Text>
-          {top.length > 0 ? <Text color={DARK}>Most traced</Text> : null}
-          {top.map(([tool, count]) => (
-            <Text color={GREEN}>
-              {'  '}{tool.padEnd(14).slice(0, 14)} <Text color={TRAIL[4]}>{'▮'.repeat(Math.min(20, count))}</Text> <Text color={HEAD}>{String(count)}</Text>
-            </Text>
-          ))}
-        </Box>
+        <Svg source={rainSvg(1600, 160, overlay)} alt="The Construct: a wall of green code rain" height={160} isInteractive />
+        {layoutConstruct(80, 60, data, data.now)
+          .filter(line => !line.action)
+          .map(line => <Text color={colorName(line.color)}>{line.text}</Text>)}
+        {controls}
       </Box>
     )
+  })
+
+  // A click on a control in the desktop's Construct.
+  on('ui.message', async ($, e, next) => {
+    if (e.element !== 'construct-rain') return next(e)
+    const action = (e.data as { action?: ConstructAction } | null)?.action
+    const isValid = action !== undefined &&
+      ('pill' in action ? action.pill === 'red' || action.pill === 'blue' : (SWITCH_NAMES as readonly string[]).includes(action.toggle))
+    if (isValid) await act($, action)
+    return {}
   })
 
   // Tool rows as green trace lines: `◢ Bash › npm test`, red when it failed.
@@ -734,12 +820,19 @@ export const register: Register = on => {
     tools.running += 1
     statusLine.trace = `◢ tracing ${who}${e.tool} ${glyph(tools.running, e.tool.length)}${glyph(e.tool.length, tools.running)}`
     renderStatus($)
+    const at = await $.clock.now()
+    const entry: MatrixTraceEntry = { id: e.tool_use_id, at, tool: e.tool, summary: traceSummary(e.tool, e as Record<string, unknown>), who }
+    const agentId = e.agentId
     await Promise.all([
       update($, trace, () => `${who}${e.tool}`),
       update($, stats, s => ({ ...s, calls: s.calls + 1, tools: { ...s.tools, [e.tool]: (s.tools[e.tool] ?? 0) + 1 } })),
+      update($, traceLog, log => [...log, entry].slice(-TRACE_KEEP)),
+      agentId ? update($, smithRoster, roster => roster.map(r => (r.id === agentId ? { ...r, calls: r.calls + 1 } : r))) : undefined,
     ])
+    let ok = false
     try {
       const ran = await next(e)
+      ok = ran.deny === undefined && ran.isError !== true
       // A failed call is a glitch in the Matrix: déjà vu.
       if (ran.deny === undefined && ran.isError === true) {
         glitchState.frames = GLITCH_FRAMES
@@ -747,6 +840,8 @@ export const register: Register = on => {
       }
       return ran
     } finally {
+      const ms = (await $.clock.now()) - at
+      await update($, traceLog, log => log.map(t => (t.id === entry.id ? { ...t, ms, ok } : t)))
       tools.running -= 1
       if (tools.running === 0) {
         renderStatus($) // back to how the last turn went
@@ -764,8 +859,11 @@ export const register: Register = on => {
     const r = await next(e)
     const agentId = r.agentId
     if (agentId && (await read($, isOn))) {
+      const since = await $.clock.now()
+      const smith: MatrixSmith = { id: agentId, task: e.description || 'on assignment', since, calls: 0 }
       await Promise.all([
-        update($, smithIds, ids => [...ids, agentId]),
+        update($, smithRoster, roster =>
+          [...roster.filter(r => r.doneAt === undefined || since - r.doneAt < SMITH_KEEP_MS), smith].slice(-8)),
         update($, stats, s => ({ ...s, smiths: (s.smiths ?? 0) + 1 })),
       ])
       $.ui.toast(`Agent Smith deployed: ${e.description}`)
@@ -786,7 +884,8 @@ export const register: Register = on => {
     const r = await next(e)
     const agentId = e.agentId
     if (agentId) {
-      await update($, smithIds, ids => ids.filter(id => id !== agentId))
+      const doneAt = await $.clock.now()
+      await update($, smithRoster, roster => roster.map(s => (s.id === agentId && s.doneAt === undefined ? { ...s, doneAt } : s)))
       return r
     }
     if (!(await read($, isOn))) return r

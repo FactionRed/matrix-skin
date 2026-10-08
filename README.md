@@ -30,9 +30,12 @@ A Matrix look for Claude Code.
   tool calls show as `SMITH › Bash`.
 - After each turn the status line says how it went ("◢ Jacked out after
   12s"). Then the Operator radios in a one-line report that a small model writes.
-- `/construct` opens the Construct: a pane with a tall wall of rain over an
-  operator console (calls traced, glitches, bullet times, Agent Smiths,
-  most-traced tools).
+- `/construct` opens the Construct: a pane that is all rain, with the
+  operator's readout decoding inside it. It shows a status line, a live trace
+  log of tool calls (time, ✓ or ✖, duration, what ran), the Agent Smith roster
+  (each task, time in the Matrix and calls) and controls. Click a control,
+  such as `[SOUND ●]` or `[BLUE PILL]`, to flip it. In the terminal, press its
+  number. When a line changes, only the changed characters decode again.
 - The footer's mode labels gain "◢ matrix" while the look is on.
 
 ## Commands

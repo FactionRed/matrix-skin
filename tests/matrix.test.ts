@@ -2,7 +2,8 @@ import type { RenderElement } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { decode, lookalike, rain, rainSvg, toolSummary } from '../hooks/register'
-import { phraseAt, rainGrid, spansOf } from '../hooks/rain-core'
+import { phraseAt, rainGrid, spansOf, thinRain } from '../hooks/rain-core'
+import { actionAt, layoutConstruct, paintConstruct } from '../hooks/construct-core'
 
 const PROMPT = {
   component: 'UserMessage',
@@ -204,7 +205,7 @@ test('bullet time slows the trace and ripples the SVG Construct', () => {
   expect(text.includes('bullet time')).toBe(true)
 })
 
-test('/construct opens a pane with rain and the operator console on each surface', async ($, on) => {
+test('/construct opens a pane of rain with the readout in it and its controls on each surface', async ($, on) => {
   mock.clock(on)
   on('ui.open', () => ({ value: undefined }) as never)
   expect((await $.command.run({ ...MATRIX, command: 'construct' })).text).toMatch(/Construct/)
@@ -216,8 +217,13 @@ test('/construct opens a pane with rain and the operator console on each surface
       requestId: 'matrix-construct',
       props: { title: 'The Construct', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
     } as never)
-    expect(await ui.find({ type: 'Text', text: /OPERATOR CONSOLE/ })).toBeDefined()
-    expect(await ui.find(surface === 'terminal' ? { type: 'Raster' } : { type: 'Client', key: 'construct-rain' })).toBeDefined()
+    if (surface === 'terminal') {
+      expect(await ui.find({ type: 'Raster', key: 'construct-rain' })).toBeDefined()
+      expect(await ui.find({ key: 'control-0' })).toBeDefined() // [SOUND ●], pressed by a key on the terminal
+    } else {
+      const client = (await ui.find({ type: 'Client', key: 'construct-rain' })) as { props?: { props?: { construct?: { switches?: object } } } }
+      expect(client?.props?.props?.construct?.switches).toBeDefined()
+    }
     await ui.unmount()
   }
 })
@@ -280,6 +286,7 @@ test('Bash rows are drawn as green trace lines; Edit rows keep the engine\'s own
 })
 
 test('a subagent is an Agent Smith: announced, counted and named on its spinner', async ($, on) => {
+  mock.clock(on)
   const toasts: string[] = []
   on('ui.toast', ($, e) => {
     toasts.push(e.text)
@@ -486,4 +493,80 @@ test('on Windows the sounds and the voice go through the built-in player and syn
   expect(heard[0]).toContain('/sounds/smith.wav')
   expect(heard[1]).toContain("SpeechSynthesizer")
   expect(heard[1]).toContain("Speak('Mister Anderson.')")
+})
+
+const DATA = {
+  now: Date.UTC(2026, 9, 8, 9, 30, 0),
+  status: { text: 'TRACING Bash', tone: 'trace' },
+  stats: { calls: 3, failures: 1, bulletTimes: 0, smiths: 1 },
+  trace: [
+    { id: 't1', at: Date.UTC(2026, 9, 8, 9, 29, 50), tool: 'Read', summary: 'src/app.ts', who: '', ms: 300, ok: true },
+    { id: 't2', at: Date.UTC(2026, 9, 8, 9, 29, 55), tool: 'Bash', summary: 'npm test', who: '', ms: 1200, ok: false },
+    { id: 't3', at: Date.UTC(2026, 9, 8, 9, 29, 59), tool: 'Grep', summary: 'TODO', who: 'SMITH › ' },
+  ],
+  smiths: [{ id: 's1', task: 'find the bug', since: Date.UTC(2026, 9, 8, 9, 29, 18), calls: 7 }],
+  switches: { isOn: true, sound: true, voice: false, rows: true, operator: true, morpheus: false },
+} as const
+
+test('the Construct lays out its readout: title, trace log, roster and controls, all inside the pane', () => {
+  const lines = layoutConstruct(60, 30, DATA as never, DATA.now)
+  const text = lines.map(l => l.text).join('\n')
+  expect(text).toContain('◢ THE CONSTRUCT')
+  expect(text).toContain('◢ TRACE LOG')
+  expect(text).toMatch(/✓\s+0\.3s Read  src\/app\.ts/)
+  expect(text).toMatch(/✖\s+1\.2s Bash  npm test/)
+  expect(text).toMatch(/◌\s+… SMITH › Grep  TODO/)
+  expect(text).toContain('◢ find the bug  0:42  7 calls')
+  const controls = lines.filter(l => l.action).map(l => l.text)
+  expect(controls).toEqual(['[SOUND ●]', '[VOICE ○]', '[ROWS ●]', '[OPERATOR ●]', '[MORPHEUS ○]', '[BLUE PILL]'])
+  expect(lines.every(l => l.y >= 0 && l.y < 30 && l.x + Array.from(l.text).length <= 60)).toBe(true)
+  // A click on a control finds its action.
+  const voice = lines.find(l => l.text === '[VOICE ○]')!
+  expect(actionAt(lines, { x: voice.x + 2, y: voice.y })).toEqual({ toggle: 'voice' })
+  expect(actionAt(lines, { x: 0, y: 0 })).toBeUndefined()
+})
+
+test('a readout line decodes out of the rain, and only its changed characters decode again', () => {
+  const grid = () => rainGrid(40, 6, 0, 0, true)
+  const read = (g: { columns: number; cp: Uint32Array }, y: number, x: number, n: number) =>
+    Array.from({ length: n }, (_, i) => String.fromCodePoint(g.cp[y * g.columns + x + i]!)).join('')
+  const memory = new Map()
+  const line = { key: 'stats', x: 2, y: 1, text: 'calls 3', color: 0x008f11 }
+  const first = grid()
+  paintConstruct(first, [line], 0, memory)
+  expect(read(first, 1, 2, 7)).not.toBe('calls 3') // still scrambled
+  const later = grid()
+  paintConstruct(later, [line], 30, memory)
+  expect(read(later, 1, 2, 7)).toBe('calls 3')
+  // The count ticks up: only the digit scrambles again.
+  const changed = grid()
+  paintConstruct(changed, [{ ...line, text: 'calls 4' }], 31, memory)
+  expect(read(changed, 1, 2, 6)).toBe('calls ')
+  expect(read(changed, 1, 8, 1)).not.toBe('4')
+})
+
+test('tool calls go into the trace log the desktop Construct shows', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  on('tool.call', () => ({ result: { stdout: 'ok' }, isError: false }) as never)
+  await $.tool.call({ tool: 'Bash', command: 'npm test' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'matrix-skin', surface: 'desktop', component: 'Pane', requestId: 'matrix-construct',
+    props: { title: 'The Construct', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  } as never)
+  const client = (await ui.find({ type: 'Client', key: 'construct-rain' })) as { props?: { props?: { construct?: { trace?: { tool: string; summary: string; ok?: boolean }[] } } } }
+  await ui.unmount()
+  const entry = client?.props?.props?.construct?.trace?.at(-1)
+  expect(entry?.tool).toBe('Bash')
+  expect(entry?.summary).toBe('npm test')
+  expect(entry?.ok).toBe(true)
+})
+
+test('the rain keeps under its glyph budget, dropping the dimmest glyphs first', () => {
+  const grid = rainGrid(120, 60, 9, 4, true)
+  const lit = () => Array.from(grid.fg).filter(c => c >= 0)
+  const brightest = Math.max(...lit().map(c => (c >> 8) & 0xff))
+  expect(lit().length).toBeGreaterThan(100) // a tall grid is mostly dark: well under the real budget of 700
+  thinRain(grid, 100)
+  expect(lit().length).toBe(100)
+  expect(Math.max(...lit().map(c => (c >> 8) & 0xff))).toBe(brightest) // the heads survive
 })

@@ -11,6 +11,37 @@ export type MatrixStats = {
   tools: Record<string, number>
 }
 
+/** One tool call in the Construct's trace log. */
+export type MatrixTraceEntry = {
+  /** The call's tool_use_id. */
+  id: string
+  /** When it started, in epoch ms. */
+  at: number
+  tool: string
+  /** Its command, path, pattern or task, on one line. */
+  summary: string
+  /** `SMITH › ` for a subagent's call, else empty. */
+  who: string
+  /** How long it ran; absent while it runs. */
+  ms?: number
+  /** Whether it succeeded; absent while it runs. */
+  ok?: boolean
+}
+
+/** One subagent in the Construct's Agent Smith roster. */
+export type MatrixSmith = {
+  /** The subagent's agentId. */
+  id: string
+  /** The task he was given. */
+  task: string
+  /** When he deployed, in epoch ms. */
+  since: number
+  /** His tool calls so far. */
+  calls: number
+  /** When he finished; absent while he runs. */
+  doneAt?: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'matrix-skin': {
@@ -25,8 +56,10 @@ declare module 'claude-code' {
       /** True while the band offers the red and blue pills. */
       isChoosing: boolean
       stats: MatrixStats
-      /** The subagents running now, by agentId: the Agent Smiths. */
-      smithIds: string[]
+      /** The latest tool calls, oldest first, for the Construct's trace log. */
+      traceLog: MatrixTraceEntry[]
+      /** The subagents deployed lately, running or just finished: the Agent Smiths. */
+      smithRoster: MatrixSmith[]
       /** True while the jack-in boot sequence plays at session start. */
       isBooting: boolean
       /** The task of an Agent Smith just deployed, while the band announces him; empty otherwise. */
