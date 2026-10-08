@@ -1,6 +1,6 @@
 {
   "name": "matrix-skin",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "A Matrix look for Claude Code: green code rain above the prompt, messages that decode out of glyph noise, déjà vu glitches, bullet time and the Construct. Choose your pill with /matrix.",
   "author": { "name": "DoomLord" },
   "homepage": "https://github.com/FactionRed/matrix-skin",

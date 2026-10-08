@@ -16,6 +16,13 @@ export const DEJA_VU = 'Déjà vu.'
 
 /** One frame of the rain, on every surface. */
 export const RAIN_MS = 80
+/** How long the jack-in boot sequence runs, in frames (about 3.6s). */
+export const BOOT_FRAMES = 45
+
+// The boot sequence's lines, as the film opens.
+const BOOT_LINES = ['Call trans opt: received. 2-19-98 13:24:18 REC:Log>', 'Trace program: running']
+// While an Agent Smith deploys, the rain replicates him.
+const SMITH = 'SMITH'
 
 export const hash = (a: number, b: number) => {
   let n = (a * 374761393 + b * 668265263) >>> 0
@@ -31,15 +38,18 @@ const GLITCH_HEX = GLITCH_TRAIL.map(hex)
 // A grid holds colors as numbers; Text takes strings: every palette color, back again.
 const COLOR_NAME = new Map([...TRAIL, ...GLITCH_TRAIL].map(color => [hex(color), color] as const))
 
-/** What the rain shows over itself: the running tool, a glitch, bullet time. */
-export type Overlay = { trace?: string; isGlitching?: boolean; isBulletTime?: boolean }
+/**
+ * What the rain shows over itself: the running tool, a glitch, bullet time,
+ * the jack-in boot sequence, and an Agent Smith being deployed (his task).
+ */
+export type Overlay = { trace?: string; isGlitching?: boolean; isBulletTime?: boolean; isBooting?: boolean; smith?: string }
 
 /** A position in a Client region, in cells. */
 export type Point = { x: number; y: number }
 /** A click's ring of light, `age` frames old. */
 export type Ripple = Point & { age: number }
-/** The pointer over a Client region and the ripples its clicks sent. */
-export type Field = { pointer?: Point | null; ripples?: Ripple[] }
+/** The pointer over a Client region, the ripples its clicks sent, and how far the boot sequence has run. */
+export type Field = { pointer?: Point | null; ripples?: Ripple[]; bootFrames?: number }
 
 /** One frame of rain: a code point and a color (`-1`, the default) per cell, row-major. */
 export type Grid = { columns: number; rows: number; cp: Uint32Array; fg: Int32Array }
@@ -77,6 +87,12 @@ export const rainGrid = (columns: number, rows: number, t: number, f = 0, isWork
     fg[y * columns + x] = color
   }
 
+  if (overlay.isBooting) {
+    bootScreen(columns, rows, Math.max(0, field.bootFrames ?? 0), f, set)
+    return { columns, rows, cp, fg }
+  }
+
+  const alphabet = overlay.smith ? SMITH : GLYPHS
   for (let x = 0; x < columns; x++) {
     const seed = hash(x, 7)
     if (seed % 100 >= 58) continue // a little over half the columns carry a drop
@@ -91,7 +107,7 @@ export const rainGrid = (columns: number, rows: number, t: number, f = 0, isWork
       const shade = Math.min(pal.length - 1, d === 0 ? 0 : 1 + Math.floor(((d - 1) * (pal.length - 2)) / trail))
       // In bullet time the glyphs hold still while the drops crawl.
       const flicker = overlay.isBulletTime ? 0 : hash(x, y + t) % 7 === 0 ? t : Math.floor(t / 4)
-      set(x, y, glyph(x * 31 + y, flicker), pal[shade]!)
+      set(x, y, glyph(x * 31 + y, flicker, alphabet), pal[shade]!)
     }
   }
 
@@ -142,6 +158,11 @@ export const rainGrid = (columns: number, rows: number, t: number, f = 0, isWork
   if (overlay.isGlitching && columns >= 12) {
     // Déjà vu: the label shudders, a few of its letters scrambling every frame.
     label(DEJA_VU, f % 2 === 0 ? GLITCH_HEX[0]! : GLITCH_HEX[2]!, k => hash(k, f) % 4 === 0)
+  } else if (overlay.smith && columns >= 24) {
+    // "Mr. Anderson...": the announcement holds steady while the rain replicates.
+    const room = columns - 26
+    const task = overlay.smith.length > room ? `${overlay.smith.slice(0, Math.max(0, room - 1))}…` : overlay.smith
+    label(task ? `AGENT SMITH DEPLOYED: ${task}` : 'AGENT SMITH DEPLOYED', TRAIL_HEX[0]!, () => false)
   } else if (isWorking && overlay.trace && columns >= 24) {
     const text = overlay.isBulletTime ? `>> TRACE ${overlay.trace} . bullet time` : `>> TRACE ${overlay.trace}`
     // Bullet time pulses the readout between white and green.
@@ -164,6 +185,32 @@ export const rainGrid = (columns: number, rows: number, t: number, f = 0, isWork
   }
 
   return { columns, rows, cp, fg }
+}
+
+/**
+ * The jack-in boot sequence, `b` frames in: the film's opening lines type
+ * themselves out, then a bar fills while the session jacks in.
+ */
+const bootScreen = (columns: number, rows: number, b: number, f: number, set: (x: number, y: number, ch: string, color: number) => void) => {
+  const pct = Math.min(100, Math.round((b / BOOT_FRAMES) * 100))
+  const width = Math.max(8, Math.min(30, columns - 22))
+  const filled = Math.round((width * pct) / 100)
+  const bar = `JACKING IN [${'█'.repeat(filled)}${'░'.repeat(width - filled)}] ${pct}%`
+  // Each line starts typing at its frame, about two characters a frame.
+  const lines = [
+    { text: BOOT_LINES[0]!, typed: Math.floor(b * 2.5) },
+    { text: BOOT_LINES[1]!, typed: Math.floor((b - 20) * 2) },
+    { text: bar, typed: b >= 26 ? bar.length : 0 },
+  ]
+  const shown = rows >= 3 ? lines : rows === 2 ? [lines[0]!, lines[2]!] : [lines[2]!]
+  const top = Math.max(0, Math.floor((rows - shown.length) / 2))
+  shown.forEach((line, k) => {
+    const chars = Array.from(line.text)
+    const typed = Math.max(0, Math.min(chars.length, line.typed))
+    chars.slice(0, typed).forEach((ch, x) => set(2 + x, top + k, ch, ch === '░' ? TRAIL_HEX[7]! : TRAIL_HEX[2]!))
+    // A blinking block cursor on the line still typing.
+    if (typed > 0 && typed < chars.length && Math.floor(f / 3) % 2 === 0) set(2 + typed, top + k, '█', TRAIL_HEX[0]!)
+  })
 }
 
 /**

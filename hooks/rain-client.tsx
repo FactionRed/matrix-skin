@@ -16,6 +16,8 @@ type RainState = {
   f: number
   pointer: Point | null
   ripples: Ripple[]
+  /** The frame the boot sequence began on; absent while it is not running. */
+  bootF?: number
 }
 
 const RIPPLE_FRAMES = 18
@@ -30,6 +32,7 @@ const Rain: ClientModule<RainProps, RainState> = (props, surface) => {
       surface.setState({
         ...s,
         f,
+        bootF: s.live.props.overlay.isBooting ? (s.bootF ?? f) : undefined,
         t: f % crawlOf(s.live.props.isWorking, s.live.props.overlay) === 0 ? s.t + 1 : s.t,
         ripples: s.ripples.map(r => ({ ...r, age: r.age + 1 })).filter(r => r.age < RIPPLE_FRAMES),
       })
@@ -53,7 +56,8 @@ const Rain: ClientModule<RainProps, RainState> = (props, surface) => {
   const columns = Math.min(240, surface.columns)
   if (columns <= 0) return <Box height={rows} />
 
-  const grid = rainGrid(columns, rows, state?.t ?? 0, state?.f ?? 0, props.isWorking, props.overlay, state ?? {})
+  const bootFrames = state?.bootF === undefined ? 0 : state.f - state.bootF
+  const grid = rainGrid(columns, rows, state?.t ?? 0, state?.f ?? 0, props.isWorking, props.overlay, { ...state, bootFrames })
 
   return (
     <Box flexDirection="column" backgroundColor="#000000" width={columns} height={rows}>

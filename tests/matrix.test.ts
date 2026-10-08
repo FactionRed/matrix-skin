@@ -335,3 +335,155 @@ test('a rain row lays out as one cell per glyph and one span per run of blanks',
     for (let k = 1; k < spans.length; k++) expect(spans[k]!.ch === undefined && spans[k - 1]!.ch === undefined).toBe(false)
   }
 })
+
+const gridRow = (grid: { columns: number; cp: Uint32Array }, y: number) =>
+  Array.from({ length: grid.columns }, (_, x) => String.fromCodePoint(grid.cp[y * grid.columns + x]!)).join('')
+
+test('the boot sequence types the opening lines, then fills the jack-in bar', () => {
+  const start = rainGrid(80, 3, 0, 0, true, { isBooting: true }, { bootFrames: 0 })
+  expect([0, 1, 2].map(y => gridRow(start, y).trim()).join('')).toBe('') // nothing typed yet, no rain
+  const end = rainGrid(80, 3, 9, 45, true, { isBooting: true }, { bootFrames: 45 })
+  expect(gridRow(end, 0)).toContain('Call trans opt: received.')
+  expect(gridRow(end, 1)).toContain('Trace program: running')
+  expect(gridRow(end, 2)).toContain('JACKING IN [')
+  expect(gridRow(end, 2)).toContain('] 100%')
+  // A one-row band shows the bar alone.
+  expect(gridRow(rainGrid(80, 1, 0, 45, true, { isBooting: true }, { bootFrames: 45 }), 0)).toContain('JACKING IN')
+})
+
+test('a deployed Agent Smith is announced in the band while the rain replicates him', () => {
+  const grid = rainGrid(80, 5, 7, 3, true, { smith: 'find the bug' })
+  expect(gridRow(grid, 2)).toContain('AGENT SMITH DEPLOYED: find the bug')
+  for (const y of [0, 1, 3, 4]) {
+    const glyphs = gridRow(grid, y).replace(/ /g, '')
+    expect(glyphs.length).toBeGreaterThan(0)
+    expect(/^[SMITH]+$/.test(glyphs)).toBe(true)
+  }
+})
+
+/** The overlay the desktop band hands its rain region right now. */
+const bandOverlay = async ($: never) => {
+  const ui = await (($ as { ui: { mount: (a: never) => Promise<{ find: (q: object) => Promise<{ props?: { props?: { overlay?: Record<string, unknown> } } } | undefined>; unmount: () => Promise<void> }> } }).ui.mount({ plugin: 'matrix-skin', surface: 'desktop', ...(BAND(false) as object) } as never))
+  const client = await ui.find({ type: 'Client', key: 'rain' })
+  await ui.unmount()
+  return client?.props?.props?.overlay ?? {}
+}
+
+test('each session opens with the boot sequence, which ends by itself', async ($, on) => {
+  mock.store(on)
+  const clock = mock.clock(on, { now: 0 })
+  on('command.register', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', ($, e) => e as never)
+  await $.session.start({ source: 'startup', cwd: '/tmp', surface: 'desktop', isInteractive: true } as never)
+  expect((await bandOverlay($ as never)).isBooting).toBe(true)
+  await clock.advance(4000)
+  expect((await bandOverlay($ as never)).isBooting).toBe(false)
+})
+
+test('a spawn puts its task in the band for a few seconds', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'smith-2' }) as never)
+  await $.agent.spawn({ prompt: 'look around', description: 'find the bug', subagentType: 'Explore' })
+  expect((await bandOverlay($ as never)).smith).toBe('find the bug')
+  await clock.advance(4000)
+  expect((await bandOverlay($ as never)).smith).toBe('')
+})
+
+/**
+ * Records the clips and words the plugin asks to play, on a machine whose OS
+ * variable is `os` (Windows_NT plays through PowerShell); `fail` makes every
+ * player reject, as a machine without one does.
+ */
+const listen = (on: never, fail = false, os?: string) => {
+  const heard: string[] = []
+  const hook = on as (event: string, fn: (...a: never[]) => unknown) => void
+  hook('env.get', (($: unknown, e: { name: string }) => ({ value: e.name === 'OS' ? os : undefined })) as never)
+  hook('process.run', (($: unknown, e: { argv: readonly string[] }) => {
+    if (fail) throw new Error('no powershell')
+    heard.push(`ps: ${e.argv[e.argv.length - 1]}`)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  }) as never)
+  hook('audio.play', (($: unknown, e: { clip: { asset?: string } }) => {
+    if (fail) throw new Error('no player')
+    heard.push(e.clip.asset ?? '?')
+    return { value: undefined }
+  }) as never)
+  hook('audio.speak', (($: unknown, e: { text: string }) => {
+    if (fail) throw new Error('no synthesizer')
+    heard.push(`say: ${e.text}`)
+    return { value: { via: 'system' } }
+  }) as never)
+  return heard
+}
+
+test('the jack-in plays its sound when a session starts', async ($, on) => {
+  mock.store(on)
+  const clock = mock.clock(on, { now: 0 })
+  const heard = listen(on as never)
+  on('command.register', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', ($, e) => e as never)
+  await $.session.start({ source: 'startup', cwd: '/tmp', surface: 'desktop', isInteractive: true } as never)
+  await clock.advance(10)
+  expect(heard).toEqual(['sounds/boot.wav'])
+})
+
+test('an Agent Smith deploys with his sound, once for several at once, and his voice only when switched on', async ($, on) => {
+  mock.store(on)
+  const clock = mock.clock(on, { now: 100_000 })
+  const heard = listen(on as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: `smith-${Math.random()}` }) as never)
+  for (const description of ['one', 'two', 'three']) await $.agent.spawn({ prompt: 'x', description, subagentType: 'Explore' })
+  await clock.advance(10)
+  expect(heard).toEqual(['sounds/smith.wav']) // the voice is off by default
+  expect((await $.command.run({ ...MATRIX, args: 'voice on' })).text).toMatch(/Voice on/)
+  await clock.advance(6000)
+  await $.agent.spawn({ prompt: 'x', description: 'four', subagentType: 'Explore' })
+  await clock.advance(10)
+  expect(heard).toEqual(['sounds/smith.wav', 'sounds/smith.wav', 'say: Mister Anderson.'])
+})
+
+test('/matrix sound off keeps the plugin silent, and a missing player is no error', async ($, on) => {
+  mock.store(on)
+  const clock = mock.clock(on, { now: 100_000 })
+  const heard = listen(on as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'smith-quiet' }) as never)
+  expect((await $.command.run({ ...MATRIX, args: 'sound off' })).text).toMatch(/Sound off/)
+  await $.agent.spawn({ prompt: 'x', description: 'quiet', subagentType: 'Explore' })
+  await clock.advance(10)
+  expect(heard).toEqual([])
+})
+
+test('a machine with no audio player still deploys Smith without an error', async ($, on) => {
+  const clock = mock.clock(on, { now: 100_000 })
+  listen(on as never, true)
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined } as never
+  })
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'smith-mute' }) as never)
+  await $.agent.spawn({ prompt: 'x', description: 'mute', subagentType: 'Explore' })
+  await clock.advance(10)
+  expect(toasts).toContain('Agent Smith deployed: mute')
+})
+
+test('on Windows the sounds and the voice go through the built-in player and synthesizer', async ($, on) => {
+  mock.store(on)
+  const clock = mock.clock(on, { now: 100_000 })
+  const heard = listen(on as never, false, 'Windows_NT')
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'smith-win' }) as never)
+  await $.command.run({ ...MATRIX, args: 'voice on' })
+  await $.agent.spawn({ prompt: 'x', description: 'windows', subagentType: 'Explore' })
+  await clock.advance(10)
+  expect(heard.length).toBe(2)
+  expect(heard[0]).toContain('Media.SoundPlayer')
+  expect(heard[0]).toContain('/sounds/smith.wav')
+  expect(heard[1]).toContain("SpeechSynthesizer")
+  expect(heard[1]).toContain("Speak('Mister Anderson.')")
+})

@@ -4,6 +4,9 @@ A Matrix look for Claude Code.
 
 ![The rain band, a tool trace, bullet time and a déjà vu glitch in the Claude Code desktop app](docs/demo.gif)
 
+- Each session opens with a jack-in sequence in the band: the film's opening
+  lines type out ("Call trans opt: received."), a bar fills, then the rain
+  starts. A phone line dials and a modem screeches while it runs.
 - Every message you send arrives as glyph noise in its own shape. Then each
   letter burns white and locks in, in a sweep from left to right (about two
   seconds). Claude's replies decode the same way inside their normal
@@ -21,8 +24,10 @@ A Matrix look for Claude Code.
 - Tool rows read as green trace lines: `◢ Bash › npm test`, red when a call
   failed. Rows whose body matters (edits, checklists, questions) keep their
   normal look.
-- Subagents are Agent Smiths: announced when deployed, named on their
-  spinners, and traced as `SMITH › Bash`.
+- Subagents are Agent Smiths. When one deploys, the band announces him and
+  the rain replicates him for a few seconds, over a low stab of sound. Switch
+  on his voice for a "Mister Anderson." now and then. His spinner shows his name, and his
+  tool calls show as `SMITH › Bash`.
 - After each turn the status line says how it went ("◢ Jacked out after
   12s"). Then the Operator radios in a one-line report that a small model writes.
 - `/construct` opens the Construct: a pane with a tall wall of rain over an
@@ -39,6 +44,8 @@ A Matrix look for Claude Code.
 | `/matrix morpheus [on\|off]` | Claude answers in the voice of Morpheus (off by default) |
 | `/matrix operator [on\|off]` | The Operator's one-line report after each turn (on by default; one small model call per turn) |
 | `/matrix rows [on\|off]` | Tool rows as green trace lines (on by default) |
+| `/matrix sound [on\|off]` | Sound for the jack-in and Agent Smith (on by default) |
+| `/matrix voice [on\|off]` | "Mister Anderson." when an Agent Smith deploys (off by default; needs sound on) |
 | `/matrix help` | Lists these |
 | `/construct` | Opens the operator console |
 
@@ -58,6 +65,12 @@ Then start a new session, or reload plugins. Type `/matrix` to choose your pill.
 It needs a recent Claude Code with plugin hook modules (built and tested on
 2.1.286). To try it from a clone without installing:
 `claude --plugin-dir /path/to/matrix-skin`
+
+macOS plays the sounds and the voice through Claude Code's own player. On
+Windows, which Claude Code has no player for, the plugin plays them with
+Windows' built-in SoundPlayer and voice, through PowerShell. A Linux terminal
+stays silent. Every sound is
+synthesized by `tools/make_sounds.py`, so the plugin ships no recorded audio.
 
 The code rain is drawn in the terminal and in the desktop app; the editor
 extensions and mobile get the decoding messages and the rest.

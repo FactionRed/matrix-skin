@@ -2,8 +2,8 @@ import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { MatrixStats } from '../types'
-import { DEJA_VU, GLITCH_TRAIL, KATAKANA, RAIN_MS, TRAIL, crawlOf, glyph, hash, rainGrid } from './rain-core'
-import type { Overlay } from './rain-core'
+import { BOOT_FRAMES, DEJA_VU, GLITCH_TRAIL, KATAKANA, RAIN_MS, TRAIL, crawlOf, glyph, hash, rainGrid } from './rain-core'
+import type { Field, Overlay } from './rain-core'
 
 // Palette: phosphor greens on the terminal's own background.
 const GREEN = TRAIL[2]!
@@ -25,6 +25,10 @@ const HOT = 2 // frames a character burns white before it locks in
 const GRACE_MS = 1500 // rows drawn this soon after load are history: no animation
 const BULLET_FRAMES = 50 // a tool running this long (4s at RAIN_MS) drops into bullet time
 const GLITCH_FRAMES = 30 // the band glitches for about 2.4s at RAIN_MS
+const BOOT_MS = BOOT_FRAMES * RAIN_MS // the jack-in sequence at session start
+const SMITH_MS = 3500 // how long the band announces a newly deployed Agent Smith
+const SMITH_SOUND_GAP_MS = 5000 // several Smiths deployed at once share one sound
+const ANDERSON_GAP_MS = 10 * 60_000 // "Mr. Anderson..." at most once in ten minutes
 
 const CONSTRUCT = 'matrix-construct'
 const BAND_ROWS = 3 // the band's rain, in rows
@@ -73,19 +77,25 @@ const trace = atom({ plugin: 'matrix-skin', key: 'trace' } as const, '')
 const isBulletTime = atom({ plugin: 'matrix-skin', key: 'isBulletTime' } as const, false)
 const isChoosing = atom({ plugin: 'matrix-skin', key: 'isChoosing' } as const, false)
 const smithIds = atom({ plugin: 'matrix-skin', key: 'smithIds' } as const, [] as string[])
+const isBooting = atom({ plugin: 'matrix-skin', key: 'isBooting' } as const, false)
+const smithAnnounce = atom({ plugin: 'matrix-skin', key: 'smithAnnounce' } as const, '')
 const isMorpheus = atom({ plugin: 'matrix-skin', key: 'isMorpheus' } as const, false)
 const isOperator = atom({ plugin: 'matrix-skin', key: 'isOperator' } as const, true)
 const isThemedRows = atom({ plugin: 'matrix-skin', key: 'isThemedRows' } as const, true)
+const isSound = atom({ plugin: 'matrix-skin', key: 'isSound' } as const, true)
+const isVoice = atom({ plugin: 'matrix-skin', key: 'isVoice' } as const, false)
 const stats = atom({ plugin: 'matrix-skin', key: 'stats' } as const, { calls: 0, failures: 0, bulletTimes: 0, smiths: 0, tools: {} } as MatrixStats)
 
 // The switches /matrix flips, each remembered across sessions under its store key.
-const SWITCH_NAMES = ['morpheus', 'operator', 'rows'] as const
+const SWITCH_NAMES = ['morpheus', 'operator', 'rows', 'sound', 'voice'] as const
 type SwitchName = (typeof SWITCH_NAMES)[number]
-const STORE_KEY: Record<SwitchName, string> = { morpheus: 'isMorpheus', operator: 'isOperator', rows: 'isThemedRows' }
+const STORE_KEY: Record<SwitchName, string> = { morpheus: 'isMorpheus', operator: 'isOperator', rows: 'isThemedRows', sound: 'isSound', voice: 'isVoice' }
 const SAID: Record<SwitchName, [on: string, off: string]> = {
   morpheus: ['Morpheus mode on. "I can only show you the door."', 'Morpheus mode off.'],
   operator: ['Operator reports on: one line after each turn.', 'Operator reports off.'],
   rows: ['Tool rows drawn as trace lines.', 'Tool rows back to normal.'],
+  sound: ['Sound on: the jack-in and Agent Smith.', 'Sound off.'],
+  voice: ['Voice on: "Mister Anderson." when an Agent Smith deploys.', 'Voice off.'],
 }
 
 const pick = (list: string[], seed: string) => {
@@ -195,8 +205,8 @@ const toBase64 = (bytes: Uint8Array) => {
 const DEFAULT = 0x01000000
 
 /** One frame of code rain, as the terminal's Raster cells. */
-export const rain = (columns: number, rows: number, t: number, f = 0, isWorking = true, overlay: Overlay = {}) => {
-  const grid = rainGrid(columns, rows, t, f, isWorking, overlay)
+export const rain = (columns: number, rows: number, t: number, f = 0, isWorking = true, overlay: Overlay = {}, field: Field = {}) => {
+  const grid = rainGrid(columns, rows, t, f, isWorking, overlay, field)
   const words = new Uint32Array(columns * rows * 3)
   for (let i = 0, j = 0; i < columns * rows; i++, j += 3) {
     words[j] = grid.cp[i]!
@@ -279,10 +289,17 @@ export const toolSummary = (tool: string, input: unknown) => {
 }
 
 /** A terminal site whose Raster the rain timer repaints: the band or the Construct. */
-type RainSite = { key: string; id: string; columns: number; rows: number; isWorking: boolean; t: number; f: number; overlay: Overlay }
+type RainSite = { key: string; id: string; columns: number; rows: number; isWorking: boolean; t: number; f: number; overlay: Overlay; bootF?: number }
+
+/** A site's boot frames so far, starting the count when its overlay starts booting. */
+const bootField = (site: RainSite): Field => {
+  site.bootF = site.overlay.isBooting ? (site.bootF ?? site.f) : undefined
+  return { bootFrames: site.bootF === undefined ? 0 : site.f - site.bootF }
+}
 
 const clockState = { loadedAt: 0 }
-const timers: { ticker?: { cancel: () => void }; rain?: { cancel: () => void }; isTicking: boolean } = { isTicking: false }
+type Timer = { cancel: () => void }
+const timers: { ticker?: Timer; rain?: Timer; boot?: Timer; isTicking: boolean } = { isTicking: false }
 const seen = new Set<string>()
 const active = new Set<string>() // the rows decoding now, by requestId
 const band: RainSite = { key: 'rain', id: '', columns: 0, rows: 0, isWorking: false, t: 0, f: 0, overlay: {} }
@@ -290,6 +307,8 @@ const construct: RainSite = { key: 'construct-rain', id: '', columns: 0, rows: 0
 const glitchState = { frames: 0 }
 const tools = { running: 0, since: 0, frames: 0, isBullet: false }
 const statusLine = { trace: '', done: '', operator: '', turnId: '' }
+const announce = { token: 0 } // the latest Smith announcement, so an older one's timer leaves it be
+const heard = { smith: -Infinity, anderson: -Infinity } // when each Smith sound last played
 
 async function tick($: EngineInterface) {
   if (timers.isTicking || active.size === 0) return
@@ -316,10 +335,71 @@ async function shouldAnimate($: EngineInterface, requestId: string) {
   return active.has(requestId)
 }
 
+// The engine has no clip player or synthesizer on Windows, so there the
+// plugin hands its WAV files to Windows' own SoundPlayer and speaks with
+// Windows' own voice, through PowerShell.
+const host: { isWindows?: Promise<boolean> } = {}
+const isWindows = ($: EngineInterface) =>
+  (host.isWindows ??= $.env.get('OS').then(os => os === 'Windows_NT', () => false))
+const psQuote = (s: string) => `'${s.replace(/'/g, "''")}'`
+const powershell = ($: EngineInterface, script: string) =>
+  $.process.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs: 15000 })
+
+/** Plays one of the plugin's clips while the look and sound are on; silent where nothing can play it. */
+async function playSound($: EngineInterface, asset: string) {
+  const [lookOn, soundOn] = await Promise.all([read($, isOn), read($, isSound)])
+  if (!lookOn || !soundOn) return
+  try {
+    if (await isWindows($)) {
+      const path = `${$.plugin.root}/${asset}` // .NET takes forward slashes on Windows
+      await powershell($, `(New-Object Media.SoundPlayer ${psQuote(path)}).PlaySync()`)
+    } else {
+      await $.audio.play({ asset }, { gain: 0.8 })
+    }
+  } catch {
+    // No player on this machine (a Linux terminal has none): the look stays silent.
+  }
+}
+
+/** Says a line in a low, slow voice, where the machine can speak. */
+async function say($: EngineInterface, text: string) {
+  try {
+    if (await isWindows($)) {
+      await powershell(
+        $,
+        'Add-Type -AssemblyName System.Speech; $v = New-Object System.Speech.Synthesis.SpeechSynthesizer; ' +
+          `try { $v.SelectVoiceByHints('Male') } catch {}; $v.Rate = -3; $v.Speak(${psQuote(text)})`,
+      )
+    } else {
+      await $.audio.speak(text)
+    }
+  } catch {
+    // No speech synthesizer here: the stab alone will do.
+  }
+}
+
+/** Agent Smith's sound: the stab for a deployment, and now and then his voice. */
+async function smithSound($: EngineInterface) {
+  const now = await $.clock.now()
+  if (now - heard.smith < SMITH_SOUND_GAP_MS) return
+  heard.smith = now
+  await playSound($, 'sounds/smith.wav')
+  const [soundOn, voiceOn] = await Promise.all([read($, isSound), read($, isVoice)])
+  if (!soundOn || !voiceOn || now - heard.anderson < ANDERSON_GAP_MS) return
+  heard.anderson = now
+  await say($, 'Mister Anderson.')
+}
+
 /** What the rain shows over itself now. */
 async function readOverlay($: EngineInterface): Promise<Overlay> {
-  const [traced, glitching, bulletTime] = await Promise.all([read($, trace), read($, isGlitching), read($, isBulletTime)])
-  return { trace: traced, isGlitching: glitching, isBulletTime: bulletTime }
+  const [traced, glitching, bulletTime, booting, smith] = await Promise.all([
+    read($, trace),
+    read($, isGlitching),
+    read($, isBulletTime),
+    read($, isBooting),
+    read($, smithAnnounce),
+  ])
+  return { trace: traced, isGlitching: glitching, isBulletTime: bulletTime, isBooting: booting, smith }
 }
 
 /** The one writer of the status line: the running tool's trace, else how the last turn went. */
@@ -347,7 +427,9 @@ async function flip($: EngineInterface, name: SwitchName, value: string) {
   const now =
     name === 'morpheus' ? await update($, isMorpheus, to)
     : name === 'operator' ? await update($, isOperator, to)
-    : await update($, isThemedRows, to)
+    : name === 'rows' ? await update($, isThemedRows, to)
+    : name === 'sound' ? await update($, isSound, to)
+    : await update($, isVoice, to)
   await $.store.set(STORE_KEY[name], now)
   return now
 }
@@ -368,17 +450,21 @@ const HELP = [
   '/matrix morpheus [on|off]: Claude answers in the voice of Morpheus.',
   '/matrix operator [on|off]: a one-line operator report after each turn (a small model call).',
   '/matrix rows [on|off]: tool rows as green trace lines.',
+  '/matrix sound [on|off]: sound for the jack-in and Agent Smith.',
+  '/matrix voice [on|off]: "Mister Anderson." when an Agent Smith deploys (needs sound on).',
   '/construct: the operator console.',
 ].join('\n')
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     clockState.loadedAt = await $.clock.now()
-    const [saved, morpheus, operator, rows] = await Promise.all([
+    const [saved, morpheus, operator, rows, sound, voice] = await Promise.all([
       $.store.get('isOn'),
       $.store.get('isMorpheus'),
       $.store.get('isOperator'),
       $.store.get('isThemedRows'),
+      $.store.get('isSound'),
+      $.store.get('isVoice'),
     ])
     const restore = (value: unknown) => (was: boolean) => (typeof value === 'boolean' ? value : was)
     await Promise.all([
@@ -386,12 +472,17 @@ export const register: Register = on => {
       update($, isMorpheus, restore(morpheus)),
       update($, isOperator, restore(operator)),
       update($, isThemedRows, restore(rows)),
+      update($, isSound, restore(sound)),
+      update($, isVoice, restore(voice)),
       // A reload starts this module's counters over but keeps $.state: put the
       // passing effects back to rest so none outlives the counter that ends it.
       update($, isGlitching, () => false),
       update($, isBulletTime, () => false),
       update($, trace, () => ''),
       update($, smithIds, () => []),
+      update($, smithAnnounce, () => ''),
+      // Every session opens with the jack-in sequence while the look is on.
+      update($, isBooting, () => saved !== false),
       $.command.register({ name: 'matrix', description: 'Red pill or blue pill; also /matrix morpheus, operator, rows (on|off), help' }),
       $.command.register({ name: 'construct', description: 'Open the Construct: a live operator console of the Matrix' }),
     ])
@@ -399,6 +490,10 @@ export const register: Register = on => {
     $.ui.toast(saved === false ? 'Matrix skin loaded (off): type /matrix red to switch it on' : '◢ Matrix skin loaded. Wake up, Neo...')
     timers.ticker?.cancel()
     timers.rain?.cancel()
+    timers.boot?.cancel()
+    timers.boot = $.clock.after(BOOT_MS, () => void update($, isBooting, () => false))
+    // The jack-in's sound, off the session's own dispatch so start never waits for it.
+    if (saved !== false) $.clock.after(1, () => void playSound($, 'sounds/boot.wav'))
     timers.ticker = $.clock.every(TICK_MS, () => void tick($))
     timers.rain = $.clock.every(RAIN_MS, () => {
       tools.frames += 1
@@ -414,7 +509,7 @@ export const register: Register = on => {
         if (!site.id) continue
         site.f += 1
         if (site.f % crawlOf(site.isWorking, site.overlay) === 0) site.t += 1
-        void $.ui.blit({ requestId: site.id, key: site.key, cells: rain(site.columns, site.rows, site.t, site.f, site.isWorking, site.overlay) })
+        void $.ui.blit({ requestId: site.id, key: site.key, cells: rain(site.columns, site.rows, site.t, site.f, site.isWorking, site.overlay, bootField(site)) })
       }
     })
 
@@ -541,7 +636,7 @@ export const register: Register = on => {
         isWorking: e.props.isWorking,
       })
 
-      return <Raster key="rain" columns={band.columns} rows={band.rows} cells={rain(band.columns, band.rows, band.t, band.f, band.isWorking, overlay)} />
+      return <Raster key="rain" columns={band.columns} rows={band.rows} cells={rain(band.columns, band.rows, band.t, band.f, band.isWorking, overlay, bootField(band))} />
     }
     if (e.surface !== 'desktop') return next(e)
     // A Client region keeps animating across redraws, where an SVG frame was
@@ -576,7 +671,7 @@ export const register: Register = on => {
         columns: Math.min(512, Math.max(1, e.props.bodyColumns)),
         rows: Math.max(3, Math.min(CONSTRUCT_ROWS, (e.viewport?.rows ?? 24) - 12)),
       })
-      screen = <Raster key="construct-rain" columns={construct.columns} rows={construct.rows} cells={rain(construct.columns, construct.rows, construct.t, construct.f, true, overlay)} />
+      screen = <Raster key="construct-rain" columns={construct.columns} rows={construct.rows} cells={rain(construct.columns, construct.rows, construct.t, construct.f, true, overlay, bootField(construct))} />
     } else if (e.surface === 'desktop') {
       const { Client } = $.ui.resolve(e)
       screen = <Client key="construct-rain" module="./rain-client.tsx" props={{ rows: CONSTRUCT_ROWS, isWorking: true, overlay }} width="100%" height={CONSTRUCT_ROWS} />
@@ -674,6 +769,13 @@ export const register: Register = on => {
         update($, stats, s => ({ ...s, smiths: (s.smiths ?? 0) + 1 })),
       ])
       $.ui.toast(`Agent Smith deployed: ${e.description}`)
+      // The band announces him, and the rain replicates him, for a few seconds.
+      const token = ++announce.token
+      await update($, smithAnnounce, () => e.description || 'on assignment')
+      $.clock.after(SMITH_MS, () => {
+        if (announce.token === token) void update($, smithAnnounce, () => '')
+      })
+      $.clock.after(1, () => void smithSound($))
     }
     return r
   })
