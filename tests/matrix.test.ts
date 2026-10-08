@@ -407,9 +407,9 @@ const listen = (on: never, fail = false, os?: string) => {
   const heard: string[] = []
   const hook = on as (event: string, fn: (...a: never[]) => unknown) => void
   hook('env.get', (($: unknown, e: { name: string }) => ({ value: e.name === 'OS' ? os : undefined })) as never)
-  hook('process.run', (($: unknown, e: { argv: readonly string[] }) => {
+  hook('process.run', (($: unknown, e: { argv: readonly string[]; init?: { env?: Record<string, string> } }) => {
     if (fail) throw new Error('no powershell')
-    heard.push(`ps: ${e.argv[e.argv.length - 1]}`)
+    heard.push(`ps: ${e.argv[e.argv.length - 1]}${e.init?.env?.MATRIX_SKIN_CLIP ? ` < ${e.init.env.MATRIX_SKIN_CLIP}` : ''}`)
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   }) as never)
   hook('audio.play', (($: unknown, e: { clip: { asset?: string } }) => {

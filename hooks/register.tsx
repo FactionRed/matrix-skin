@@ -119,7 +119,7 @@ const lifetime = atom({ plugin: 'matrix-skin', key: 'lifetime' } as const, ZERO_
 const SWITCH_NAMES = ['morpheus', 'operator', 'rows', 'sound', 'voice'] as const
 type SwitchName = (typeof SWITCH_NAMES)[number]
 const STORE_KEY: Record<SwitchName, string> = { morpheus: 'isMorpheus', operator: 'isOperator', rows: 'isThemedRows', sound: 'isSound', voice: 'isVoice' }
-const SAID: Record<SwitchName, [on: string, off: string]> = {
+const SAID: Record<SwitchName, [whenOn: string, whenOff: string]> = {
   morpheus: ['Morpheus mode on. "I can only show you the door."', 'Morpheus mode off.'],
   operator: ['Operator reports on: one line after each turn.', 'Operator reports off.'],
   rows: ['Tool rows drawn as trace lines.', 'Tool rows back to normal.'],
@@ -262,12 +262,12 @@ export const rainSvg = (width: number, height: number, overlay: Overlay = {}) =>
   const r = (v: number) => Math.round(v * 100) / 100
   const columns: string[] = []
   for (let c = 0; c < n; c++) {
-    const h = hash(c, 11)
-    if (h % 100 >= 72) continue
-    const len = 7 + (h % 9)
+    const seed = hash(c, 11)
+    if (seed % 100 >= 72) continue
+    const len = 7 + (seed % 9)
     const span = len * CELL
-    const dur = r((1.4 + ((h >>> 8) % 25) / 10) * slow * Math.max(1, height / 120))
-    const begin = r(-(((h >>> 4) % 100) / 100) * dur)
+    const dur = r((1.4 + ((seed >>> 8) % 25) / 10) * slow * Math.max(1, height / 120))
+    const begin = r(-(((seed >>> 4) % 100) / 100) * dur)
     const xs = Array(len).fill('0').join(' ')
     const ys = Array.from({ length: len }, (_, i) => i * CELL).join(' ')
     const glyphs = Array.from({ length: len }, (_, i) => glyph(c * 17 + i, 1)).join('')
@@ -479,9 +479,6 @@ async function shouldAnimate($: EngineInterface, requestId: string) {
 const host: { isWindows?: Promise<boolean> } = {}
 const isWindows = ($: EngineInterface) =>
   (host.isWindows ??= $.env.get('OS').then(os => os === 'Windows_NT', () => false))
-const psQuote = (s: string) => `'${s.replace(/'/g, "''")}'`
-const powershell = ($: EngineInterface, script: string) =>
-  $.process.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs: 15000 })
 
 /** Plays one of the plugin's clips while the look and sound are on; silent where nothing can play it. */
 async function playSound($: EngineInterface, asset: string) {
@@ -489,8 +486,11 @@ async function playSound($: EngineInterface, asset: string) {
   if (!lookOn || !soundOn) return
   try {
     if (await isWindows($)) {
-      const path = `${$.plugin.root}/${asset}` // .NET takes forward slashes on Windows
-      await powershell($, `(New-Object Media.SoundPlayer ${psQuote(path)}).PlaySync()`)
+      // The clip's path goes in through the environment, so the command itself never changes.
+      await $.process.run(
+        ['powershell', '-NoProfile', '-NonInteractive', '-Command', '(New-Object Media.SoundPlayer $env:MATRIX_SKIN_CLIP).PlaySync()'],
+        { timeoutMs: 15000, env: { MATRIX_SKIN_CLIP: `${$.plugin.root}/${asset}` } }, // .NET takes forward slashes on Windows
+      )
     } else {
       await $.audio.play({ asset }, { gain: 0.8 })
     }
@@ -499,17 +499,19 @@ async function playSound($: EngineInterface, asset: string) {
   }
 }
 
-/** Says a line in a low, slow voice, where the machine can speak. */
-async function say($: EngineInterface, text: string) {
+/** Agent Smith says "Mister Anderson." in a low, slow voice, where the machine can speak. */
+async function sayAnderson($: EngineInterface) {
   try {
     if (await isWindows($)) {
-      await powershell(
-        $,
-        'Add-Type -AssemblyName System.Speech; $v = New-Object System.Speech.Synthesis.SpeechSynthesizer; ' +
-          `try { $v.SelectVoiceByHints('Male') } catch {}; $v.Rate = -3; $v.Speak(${psQuote(text)})`,
+      await $.process.run(
+        [
+          'powershell', '-NoProfile', '-NonInteractive', '-Command',
+          "Add-Type -AssemblyName System.Speech; $v = New-Object System.Speech.Synthesis.SpeechSynthesizer; try { $v.SelectVoiceByHints('Male') } catch {}; $v.Rate = -3; $v.Speak('Mister Anderson.')",
+        ],
+        { timeoutMs: 15000 },
       )
     } else {
-      await $.audio.speak(text)
+      await $.audio.speak('Mister Anderson.')
     }
   } catch {
     // No speech synthesizer here: the stab alone will do.
@@ -525,7 +527,7 @@ async function smithSound($: EngineInterface) {
   const [soundOn, voiceOn] = await Promise.all([read($, isSound), read($, isVoice)])
   if (!soundOn || !voiceOn || now - heard.anderson < ANDERSON_GAP_MS) return
   heard.anderson = now
-  await say($, 'Mister Anderson.')
+  await sayAnderson($)
 }
 
 /** What the rain shows over itself now. */
@@ -690,15 +692,15 @@ function renderStatus($: EngineInterface) {
 
 /** Red or blue: the look on or off, remembered, and the choice put away. */
 async function choose($: EngineInterface, pill: 'red' | 'blue') {
-  const on = pill === 'red'
-  await Promise.all([update($, isOn, () => on), $.store.set('isOn', on), update($, isChoosing, () => false)])
-  if (!on) {
+  const isRed = pill === 'red'
+  await Promise.all([update($, isOn, () => isRed), $.store.set('isOn', isRed), update($, isChoosing, () => false)])
+  if (!isRed) {
     Object.assign(statusLine, { trace: '', done: '', operator: '' })
     $.ui.status(undefined)
   }
-  $.ui.toast(on ? 'Welcome to the real world.' : 'The story ends. You wake up in your bed.')
+  $.ui.toast(isRed ? 'Welcome to the real world.' : 'The story ends. You wake up in your bed.')
 
-  return on
+  return isRed
 }
 
 /** Sets a /matrix switch (`on`, `off`, or the other way round) and remembers it. */

@@ -3,7 +3,7 @@
 A Matrix look for Claude Code. An unofficial, free fan project, not affiliated
 with or endorsed by Warner Bros. (see [License](#license)).
 
-![The rain band, a tool trace, bullet time and a déjà vu glitch in the Claude Code desktop app](docs/demo.gif)
+![The rain band, a tool trace, bullet time and a déjà vu glitch in the Claude Code desktop app](https://github.com/FactionRed/matrix-skin/releases/download/v1.3.1/demo.gif)
 
 - Each session opens with a jack-in sequence in the band: the film's opening
   lines type out ("Call trans opt: received."), a bar fills, then the rain
@@ -118,9 +118,12 @@ Everything it does outside its own code goes through Claude Code:
   running subagents' tasks and the most-opened files (last two path parts).
 - **Processes.** `git status --porcelain=v1 --branch` runs in the session's
   folder after Bash and edit calls, and when `/construct` opens, for Zion. On
-  Windows, `powershell` plays the plugin's own WAV files through
-  `Media.SoundPlayer`, and speaks "Mister Anderson." through `System.Speech`
-  when the voice is on.
+  Windows, which Claude Code has no audio player for, two fixed `powershell`
+  commands run: one plays the plugin's own WAV file through
+  `Media.SoundPlayer` (the file's path goes in through the `MATRIX_SKIN_CLIP`
+  environment variable), and one speaks "Mister Anderson." through
+  `System.Speech` when the voice is on. Nothing else is started, and no
+  command ever takes text from the conversation.
 - **Environment.** It reads the `OS` variable, to know whether it runs on
   Windows.
 - **System prompt.** Morpheus mode, off by default, adds one section that sets
@@ -129,6 +132,29 @@ Everything it does outside its own code goes through Claude Code:
   and the ids of the last 20 sessions (so a reload isn't counted as a new
   session). The trace log, the Keymaker's files and the Oracle's answer are
   kept for the session only.
+
+### What each hook does
+
+The plugin never approves, denies or rewrites a tool call, a subagent or a
+setting, and it starts no agents or tools of its own.
+
+- `tool.call`: watches each call to draw the trace log, the band's trace and
+  the status line. It passes the call on unchanged and reads only the result's
+  text, for the trace line's detail.
+- `agent.spawn`: passes the spawn on unchanged, then records the subagent as
+  an Agent Smith (his task and call count) for the band and the roster.
+- `turn.complete`: notes how long the turn took, and hands the final answer to
+  the Operator's report (above).
+- `prompt.compose`: adds the Morpheus voice section while Morpheus mode is on,
+  and changes nothing else.
+- `command.run`: answers its own `/matrix` and `/construct` commands only.
+- `ui.render`, `ui.message`, `session.start`: draw the look, take clicks on
+  the Construct's controls, and start the rain and the boot sequence.
+
+The files in `tests/` run only under `claude plugin test`, against the test
+kit's stand-ins. They call `$.command.run`, `$.agent.spawn` and `$.tool.call`
+and hook `process.run` there to check the plugin; Claude Code never loads them
+in a session.
 
 ## License
 
