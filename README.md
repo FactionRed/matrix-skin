@@ -1,6 +1,7 @@
 # matrix-skin
 
-A Matrix look for Claude Code.
+A Matrix look for Claude Code. An unofficial, free fan project, not affiliated
+with or endorsed by Warner Bros. (see [License](#license)).
 
 ![The rain band, a tool trace, bullet time and a déjà vu glitch in the Claude Code desktop app](docs/demo.gif)
 
@@ -85,8 +86,9 @@ In Claude Code (terminal or the desktop app's Code tab):
 
 Then start a new session, or reload plugins. Type `/matrix` to choose your pill.
 
-It needs a recent Claude Code with plugin hook modules (built and tested on
-2.1.289). To try it from a clone without installing:
+It needs Claude Code 2.1.287 or later in the terminal, or the Desktop app's
+Code tab from 2.1.286, where mods are on by default; no setting is needed. It
+was built and tested on 2.1.289. To try it from a clone without installing:
 `claude --plugin-dir /path/to/matrix-skin`
 
 macOS plays the sounds and the voice through Claude Code's own player. On
@@ -103,7 +105,40 @@ Tune it: colors, speeds and glyphs are constants at the top of
 message takes to decode. BULLET_FRAMES sets how long a tool runs before bullet
 time. PHRASES sets what types into the rain, and TRAIL sets the trail's colors.
 
+## What it runs and sends
+
+matrix-skin makes no network requests of its own and sends no telemetry.
+Everything it does outside its own code goes through Claude Code:
+
+- **Model calls, on your Claude plan or API key.** The Operator's report is one
+  small model call (Haiku) after each turn. It sends the first 4,000
+  characters of Claude's final answer. Turn it off with `/matrix operator off`.
+  Each `[ORACLE]` click in the Construct is one more Haiku call. It sends the
+  last 20 tool calls (tool, command or path, and whether each failed), the
+  running subagents' tasks and the most-opened files (last two path parts).
+- **Processes.** `git status --porcelain=v1 --branch` runs in the session's
+  folder after Bash and edit calls, and when `/construct` opens, for Zion. On
+  Windows, `powershell` plays the plugin's own WAV files through
+  `Media.SoundPlayer`, and speaks "Mister Anderson." through `System.Speech`
+  when the voice is on.
+- **Environment.** It reads the `OS` variable, to know whether it runs on
+  Windows.
+- **System prompt.** Morpheus mode, off by default, adds one section that sets
+  Claude's voice. Nothing else changes the prompt.
+- **Storage.** The plugin's own store keeps your switches, the lifetime totals
+  and the ids of the last 20 sessions (so a reload isn't counted as a new
+  session). The trace log, the Keymaker's files and the Oracle's answer are
+  kept for the session only.
+
 ## License
 
 Copyright (c) 2026 DoomLord. All rights reserved. You may install and use the
-plugin; no license is granted to copy, modify or redistribute its source.
+plugin; no license is granted to copy, modify or redistribute its source. See
+[LICENSE](LICENSE).
+
+matrix-skin is an unofficial, free fan project. It is not affiliated with,
+sponsored by or endorsed by Warner Bros. Entertainment Inc. or any other owner
+of The Matrix. "The Matrix" and its related names, characters and quotations
+are the property of their respective owners. The plugin ships no footage,
+images or audio from the films: its sounds are synthesized by
+`tools/make_sounds.py`.
