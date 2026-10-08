@@ -1,11 +1,11 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { MatrixSmith, MatrixStats, MatrixTraceEntry } from '../types'
+import type { MatrixDoor, MatrixLifetime, MatrixOracle, MatrixSmith, MatrixStats, MatrixTraceEntry, MatrixZion } from '../types'
 import { constructControls, layoutConstruct, paintConstruct } from './construct-core'
 import type { ConstructAction, ConstructData, DecodeMemory } from './construct-core'
-import { BOOT_FRAMES, DEJA_VU, GLITCH_TRAIL, KATAKANA, RAIN_MS, TRAIL, colorName, crawlOf, glyph, hash, rainGrid } from './rain-core'
-import type { Field, Grid, Overlay } from './rain-core'
+import { BOOT_FRAMES, DEJA_VU, GLITCH_TRAIL, KATAKANA, RAIN_MS, TRAIL, colorName, crawlOf, glyph, hash, nextSentinels, rainGrid } from './rain-core'
+import type { Field, Grid, Overlay, Sentinel } from './rain-core'
 
 // Palette: phosphor greens on the terminal's own background.
 const GREEN = TRAIL[2]!
@@ -37,6 +37,16 @@ const BAND_ROWS = 3 // the band's rain, in rows
 const CONSTRUCT_ROWS = 12 // the least rain the Construct shows, in rows
 const TRACE_KEEP = 40 // tool calls the trace log keeps
 const SMITH_KEEP_MS = 60_000 // how long a finished Agent Smith stays on the roster
+const DOOR_KEEP = 60 // files the Keymaker keeps count of
+const ZION_DELAY_MS = 1500 // a burst of edits reads git once, after it settles
+const LIFE_FLUSH_MS = 15_000 // how often this session's totals go into the store
+const DETAIL_LINES = 6 // lines of a call's command and output kept for its opened trace line
+
+// Calls that can change the working copy: Zion reads git again after each.
+const ZION_TOOLS = new Set(['Bash', 'PowerShell', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+// Calls that open a file: the Keymaker counts them.
+const READ_TOOLS = new Set(['Read'])
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 
 /**
  * Tool rows drawn as green trace lines, and the one line each shows. Tools not
@@ -74,6 +84,14 @@ const OPERATOR_SYSTEM = [
   'assistant asks the user something, say what it asks.',
 ].join(' ')
 
+const ORACLE_SYSTEM = [
+  'You are the Oracle from The Matrix: warm, wry, unhurried, a little cryptic. You are shown what a coding assistant',
+  'has done this session: its recent tool calls (FAILED marks a failure), its subagents and the files it touched.',
+  'Give one short prophecy about how the work is going or what to watch next, under 25 words. Ground it in the trace:',
+  'name the real thing (a command that keeps failing, a file edited again and again) through a Matrix metaphor.',
+  'Plain text: no quotes, no emoji, no markdown.',
+].join(' ')
+
 const isOn = atom({ plugin: 'matrix-skin', key: 'isOn' } as const, true)
 const frame = atom({ plugin: 'matrix-skin', key: 'frame' } as const, 0)
 const isGlitching = atom({ plugin: 'matrix-skin', key: 'isGlitching' } as const, false)
@@ -90,6 +108,12 @@ const isThemedRows = atom({ plugin: 'matrix-skin', key: 'isThemedRows' } as cons
 const isSound = atom({ plugin: 'matrix-skin', key: 'isSound' } as const, true)
 const isVoice = atom({ plugin: 'matrix-skin', key: 'isVoice' } as const, false)
 const stats = atom({ plugin: 'matrix-skin', key: 'stats' } as const, { calls: 0, failures: 0, bulletTimes: 0, smiths: 0, tools: {} } as MatrixStats)
+const sentinels = atom({ plugin: 'matrix-skin', key: 'sentinels' } as const, 0)
+const zion = atom({ plugin: 'matrix-skin', key: 'zion' } as const, null as MatrixZion | null)
+const doors = atom({ plugin: 'matrix-skin', key: 'doors' } as const, [] as MatrixDoor[])
+const oracle = atom({ plugin: 'matrix-skin', key: 'oracle' } as const, null as MatrixOracle | null)
+const ZERO_LIFE: MatrixLifetime = { ms: 0, calls: 0, failures: 0, smiths: 0, bulletTimes: 0, sessions: 0 }
+const lifetime = atom({ plugin: 'matrix-skin', key: 'lifetime' } as const, ZERO_LIFE)
 
 // The switches /matrix flips, each remembered across sessions under its store key.
 const SWITCH_NAMES = ['morpheus', 'operator', 'rows', 'sound', 'voice'] as const
@@ -302,6 +326,77 @@ const traceSummary = (tool: string, input: Record<string, unknown>) => {
   return (toolSummary(tool, input) || String(fallback?.[1] ?? '')).split('\n')[0]!.slice(0, 160)
 }
 
+/** A path's last two parts, `hooks/register.tsx`: enough to know the file, and no more of the machine. */
+const shortPath = (path: string) => path.split(/[\\/]/).filter(Boolean).slice(-2).join('/')
+
+// Escape sequences and control characters: a tool's output carries colors no Text draws.
+const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g
+const CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/g
+
+/** What an opened trace line shows: the call's command, then the tail of its output. */
+export const detailOf = (input: Record<string, unknown>, output: string) => {
+  const clean = (line: string) => line.replace(ANSI, '').replace(/\t/g, '  ').replace(CONTROL, '').trimEnd().slice(0, 200)
+  const command = typeof input.command === 'string' ? input.command : ''
+  const head = command.split('\n').map(clean).filter(l => l.trim()).slice(0, 2).map(l => `$ ${l.trim()}`)
+  const tail = output.split(/\r?\n/).map(clean).filter(l => l.trim()).slice(-(DETAIL_LINES - head.length))
+  return [...head, ...(tail.length ? tail : ['(no output)'])]
+}
+
+/**
+ * How many times in a row the same call has now failed, `entry` counted: the
+ * same tool, input and caller, back through the recent log to its last success.
+ */
+export const repeatOf = (log: MatrixTraceEntry[], entry: MatrixTraceEntry) => {
+  let n = 1
+  for (const t of log.slice(-12).reverse()) {
+    if (t.id === entry.id || t.ok === undefined || t.who !== entry.who || t.tool !== entry.tool || t.summary !== entry.summary) continue
+    if (t.ok) break
+    n += 1
+  }
+  return n
+}
+
+/** `git status --porcelain --branch`, read as Zion: the branch, its drift from the remote, and what changed. */
+export const parseZion = (out: string): MatrixZion => {
+  const lines = out.split(/\r?\n/).filter(Boolean)
+  const head = lines[0]?.startsWith('## ') ? lines.shift()!.slice(3) : ''
+  const branch = head.startsWith('No commits yet on ') ? head.slice('No commits yet on '.length)
+    : head.startsWith('HEAD (no branch)') ? 'detached'
+    : head.split('...')[0]!.split(' ')[0]!
+  return {
+    isRepo: true,
+    branch: branch || 'unknown',
+    ahead: Number(/ahead (\d+)/.exec(head)?.[1] ?? 0),
+    behind: Number(/behind (\d+)/.exec(head)?.[1] ?? 0),
+    changed: lines.length,
+  }
+}
+
+const addLife = (a: MatrixLifetime, b: Partial<MatrixLifetime>): MatrixLifetime => ({
+  ms: a.ms + (b.ms ?? 0),
+  calls: a.calls + (b.calls ?? 0),
+  failures: a.failures + (b.failures ?? 0),
+  smiths: a.smiths + (b.smiths ?? 0),
+  bulletTimes: a.bulletTimes + (b.bulletTimes ?? 0),
+  sessions: a.sessions + (b.sessions ?? 0),
+})
+/** The stored totals, whatever the store holds. */
+const lifeOf = (value: unknown): MatrixLifetime => {
+  const v = (value ?? {}) as Record<string, unknown>
+  const n = (k: keyof MatrixLifetime) => (typeof v[k] === 'number' && Number.isFinite(v[k]) ? (v[k] as number) : 0)
+  return { ms: n('ms'), calls: n('calls'), failures: n('failures'), smiths: n('smiths'), bulletTimes: n('bulletTimes'), sessions: n('sessions') }
+}
+
+/** What the Oracle is shown: the session's recent calls, its Smiths and the files it touched. */
+const oraclePrompt = (log: MatrixTraceEntry[], roster: MatrixSmith[], s: MatrixStats, opened: MatrixDoor[]) =>
+  [
+    `Tool calls: ${s.calls}, failures: ${s.failures}, subagents: ${s.smiths ?? 0}.`,
+    log.length ? 'Recent tool calls, oldest first:' : 'No tool calls yet.',
+    ...log.slice(-20).map(t => `${t.ok === false ? 'FAILED ' : ''}${t.who}${t.tool}: ${t.summary}${t.repeat ? ` (failed ${t.repeat} times in a row)` : ''}`),
+    roster.length ? `Subagents: ${roster.map(r => r.task).join('; ')}` : '',
+    opened.length ? `Files touched most: ${opened.slice(0, 5).map(d => `${shortPath(d.path)} (read ${d.reads}, edited ${d.edits})`).join('; ')}` : '',
+  ].filter(Boolean).join('\n').slice(0, 4000)
+
 /** A terminal site whose Raster the rain timer repaints: the band or the Construct. */
 type RainSite = {
   key: string
@@ -313,21 +408,24 @@ type RainSite = {
   f: number
   overlay: Overlay
   bootF?: number
+  /** The Sentinels crossing, and the failed calls it has sent them for. */
+  sentinels: Sentinel[]
+  failures?: number
   /** The Construct's readout, the frame it arrived on, and its decode memory. */
   data?: ConstructData
   dataF?: number
   memory?: DecodeMemory
 }
 
-/** A site's boot frames so far, starting the count when its overlay starts booting. */
-const bootField = (site: RainSite): Field => {
+/** A site's boot frames so far (counted from when its overlay starts booting) and its Sentinels. */
+const fieldOf = (site: RainSite): Field => {
   site.bootF = site.overlay.isBooting ? (site.bootF ?? site.f) : undefined
-  return { bootFrames: site.bootF === undefined ? 0 : site.f - site.bootF }
+  return { bootFrames: site.bootF === undefined ? 0 : site.f - site.bootF, sentinels: site.sentinels }
 }
 
 /** The Construct's Raster: its rain, with the readout decoding into it. */
 const constructCells = (site: RainSite) => {
-  const grid = rainGrid(site.columns, site.rows, site.t, site.f, true, site.overlay, bootField(site))
+  const grid = rainGrid(site.columns, site.rows, site.t, site.f, true, site.overlay, fieldOf(site))
   if (site.data && !site.overlay.isBooting) {
     const now = site.data.now + (site.f - (site.dataF ?? site.f)) * RAIN_MS
     paintConstruct(grid, layoutConstruct(site.columns, site.rows, site.data, now), site.f, (site.memory ??= new Map()))
@@ -337,16 +435,18 @@ const constructCells = (site: RainSite) => {
 
 const clockState = { loadedAt: 0 }
 type Timer = { cancel: () => void }
-const timers: { ticker?: Timer; rain?: Timer; boot?: Timer; isTicking: boolean } = { isTicking: false }
+const timers: { ticker?: Timer; rain?: Timer; boot?: Timer; life?: Timer; isTicking: boolean } = { isTicking: false }
 const seen = new Set<string>()
 const active = new Set<string>() // the rows decoding now, by requestId
-const band: RainSite = { key: 'rain', id: '', columns: 0, rows: 0, isWorking: false, t: 0, f: 0, overlay: {} }
-const construct: RainSite = { key: 'construct-rain', id: '', columns: 0, rows: 0, isWorking: true, t: 0, f: 0, overlay: {} }
+const band: RainSite = { key: 'rain', id: '', columns: 0, rows: 0, isWorking: false, t: 0, f: 0, overlay: {}, sentinels: [] }
+const construct: RainSite = { key: 'construct-rain', id: '', columns: 0, rows: 0, isWorking: true, t: 0, f: 0, overlay: {}, sentinels: [] }
 const glitchState = { frames: 0 }
 const tools = { running: 0, since: 0, frames: 0, isBullet: false }
 const statusLine = { trace: '', done: '', operator: '', turnId: '' }
 const announce = { token: 0 } // the latest Smith announcement, so an older one's timer leaves it be
 const heard = { smith: -Infinity, anderson: -Infinity } // when each Smith sound last played
+const zionRead = { token: 0 } // the latest git read asked for, so an older one's timer leaves it be
+const life = { pending: { ...ZERO_LIFE }, isDirty: false } // this session's totals not yet stored
 
 async function tick($: EngineInterface) {
   if (timers.isTicking || active.size === 0) return
@@ -430,19 +530,20 @@ async function smithSound($: EngineInterface) {
 
 /** What the rain shows over itself now. */
 async function readOverlay($: EngineInterface): Promise<Overlay> {
-  const [traced, glitching, bulletTime, booting, smith] = await Promise.all([
+  const [traced, glitching, bulletTime, booting, smith, failures] = await Promise.all([
     read($, trace),
     read($, isGlitching),
     read($, isBulletTime),
     read($, isBooting),
     read($, smithAnnounce),
+    read($, sentinels),
   ])
-  return { trace: traced, isGlitching: glitching, isBulletTime: bulletTime, isBooting: booting, smith }
+  return { trace: traced, isGlitching: glitching, isBulletTime: bulletTime, isBooting: booting, smith, sentinels: failures }
 }
 
-/** Everything the Construct's readout shows, gathered from state. */
-async function constructData($: EngineInterface, overlay: Overlay): Promise<ConstructData> {
-  const [now, s, log, roster, lookOn, sound, voice, rows, operator, morpheus] = await Promise.all([
+/** Everything the Construct's readout shows, gathered from state: the last `keep` calls of the trace log. */
+async function constructData($: EngineInterface, overlay: Overlay, keep = TRACE_KEEP): Promise<ConstructData> {
+  const [now, s, log, roster, lookOn, sound, voice, rows, operator, morpheus, git, opened, word, totals] = await Promise.all([
     $.clock.now(),
     read($, stats),
     read($, traceLog),
@@ -453,32 +554,132 @@ async function constructData($: EngineInterface, overlay: Overlay): Promise<Cons
     read($, isThemedRows),
     read($, isOperator),
     read($, isMorpheus),
+    read($, zion),
+    read($, doors),
+    read($, oracle),
+    read($, lifetime),
   ])
   const running = roster.filter(r => r.doneAt === undefined).length
+  // A déjà vu loop: the last call to finish failed as the ones before it did.
+  const last = [...log].reverse().find(t => t.ok !== undefined)
+  const loop = last && last.ok === false && (last.repeat ?? 0) >= 2 ? `DÉJÀ VU  ${last.who}${last.tool} ${last.summary} ×${last.repeat}` : ''
   const status: ConstructData['status'] = overlay.isGlitching
-    ? { text: 'GLITCH: déjà vu. They changed something.', tone: 'glitch' }
+    ? { text: loop ? `${loop} · going in circles` : 'GLITCH: déjà vu. They changed something.', tone: 'glitch' }
     : overlay.isBulletTime
     ? { text: `BULLET TIME: ${overlay.trace} is taking its time`, tone: 'bullet' }
     : running > 0
     ? { text: `${running} AGENT SMITH${running === 1 ? '' : 'S'} IN THE MATRIX`, tone: 'smith' }
     : overlay.trace
     ? { text: `TRACING ${overlay.trace}`, tone: 'trace' }
+    : loop
+    ? { text: loop, tone: 'glitch' }
     : { text: 'OPERATOR STANDING BY', tone: 'calm' }
 
   return {
     now,
     status,
     stats: { calls: s.calls, failures: s.failures, bulletTimes: s.bulletTimes, smiths: s.smiths ?? 0 },
-    trace: log,
+    trace: log.slice(-keep),
     smiths: roster.filter(r => r.doneAt === undefined || now - r.doneAt < SMITH_KEEP_MS),
     switches: { isOn: lookOn, sound, voice, rows, operator, morpheus },
+    zion: git,
+    doors: opened.slice(0, 4).map(d => ({ ...d, path: shortPath(d.path) })),
+    doorCount: opened.length,
+    oracle: word,
+    lifetime: totals,
   }
 }
 
-/** What a Construct control does: flip its switch, or take its pill. */
+/** What a Construct control does: flip its switch, take its pill, or consult the Oracle. */
 async function act($: EngineInterface, action: ConstructAction) {
   if ('pill' in action) await choose($, action.pill)
-  else await flip($, action.toggle, '')
+  else if ('toggle' in action) await flip($, action.toggle, '')
+  else if ('oracle' in action) {
+    const word = await read($, oracle)
+    if (word?.isConsulting) return
+    const at = await $.clock.now()
+    await update($, oracle, () => ({ text: word?.text ?? '', at, isConsulting: true }))
+    // Off the click's own dispatch: she takes her time.
+    $.clock.after(1, () => void consultOracle($))
+  }
+}
+
+/** The Oracle's prophecy on the session so far, from a small model. */
+async function consultOracle($: EngineInterface) {
+  const [log, roster, s, opened] = await Promise.all([read($, traceLog), read($, smithRoster), read($, stats), read($, doors)])
+  let text = 'The Oracle is not taking visitors right now. Come back later.'
+  try {
+    const r = await $.model.complete({ model: 'haiku', system: ORACLE_SYSTEM, prompt: oraclePrompt(log, roster, s, opened), maxTokens: 120, effort: 'low', timeoutMs: 20000 })
+    const said = r.isAnswered ? r.text.replace(/\s+/g, ' ').trim().replace(/^["'“]+|["'”]+$/g, '').slice(0, 240) : ''
+    if (said) text = said
+  } catch {
+    // No answer: she is out.
+  }
+  const at = await $.clock.now()
+  await update($, oracle, () => ({ text, at, isConsulting: false }))
+}
+
+/** Reads git again once a burst of calls settles: Zion's line. */
+function refreshZion($: EngineInterface, delay = ZION_DELAY_MS) {
+  const token = ++zionRead.token
+  $.clock.after(delay, async () => {
+    if (zionRead.token !== token) return
+    let git: MatrixZion = { isRepo: false, branch: '', ahead: 0, behind: 0, changed: 0 }
+    try {
+      const r = await $.process.run(['git', 'status', '--porcelain=v1', '--branch'], { timeoutMs: 10000, env: { GIT_OPTIONAL_LOCKS: '0' } })
+      if (r.exitCode === 0) git = parseZion(r.stdout)
+    } catch {
+      // No git on this machine: Zion is offline.
+    }
+    await update($, zion, () => git)
+  })
+}
+
+/** Counts a file a call opened: a door the Keymaker knows. */
+async function openDoor($: EngineInterface, tool: string, input: Record<string, unknown>) {
+  const raw = typeof input.file_path === 'string' ? input.file_path : typeof input.notebook_path === 'string' ? input.notebook_path : ''
+  const isEdit = EDIT_TOOLS.has(tool)
+  if (!raw || (!isEdit && !READ_TOOLS.has(tool))) return
+  const path = raw.replace(/\\/g, '/')
+  const weight = (d: MatrixDoor) => d.edits * 2 + d.reads
+  await update($, doors, list => {
+    const found = list.some(d => d.path === path)
+    const next = found ? list.map(d => (d.path === path ? { ...d, reads: d.reads + (isEdit ? 0 : 1), edits: d.edits + (isEdit ? 1 : 0) } : d))
+      : [...list, { path, reads: isEdit ? 0 : 1, edits: isEdit ? 1 : 0 }]
+    return next.sort((a, b) => weight(b) - weight(a)).slice(0, DOOR_KEEP)
+  })
+}
+
+/** Adds to the totals across sessions: shown at once, stored on the next flush. */
+function bumpLife($: EngineInterface, delta: Partial<MatrixLifetime>) {
+  life.pending = addLife(life.pending, delta)
+  life.isDirty = true
+  return update($, lifetime, l => addLife(l, delta))
+}
+
+/** Puts this session's new totals into the store, on top of whatever other sessions put there. */
+async function flushLife($: EngineInterface) {
+  if (!life.isDirty) return
+  const delta = life.pending
+  Object.assign(life, { pending: { ...ZERO_LIFE }, isDirty: false })
+  const total = addLife(lifeOf(await $.store.get('lifetime')), delta)
+  await $.store.set('lifetime', total)
+  await update($, lifetime, () => addLife(total, life.pending))
+}
+
+/** The rows the terminal's control Buttons wrap onto, at `columns` across. */
+const buttonRows = (d: ConstructData, columns: number) => {
+  let rows = 1
+  let x = 0
+  for (const { label } of constructControls(d)) {
+    const width = Array.from(label).length
+    if (x > 0 && x + width > columns) {
+      rows += 1
+      x = 0
+    }
+    x += width + 1
+  }
+  return rows
 }
 
 /** The one writer of the status line: the running tool's trace, else how the last turn went. */
@@ -515,8 +716,8 @@ async function flip($: EngineInterface, name: SwitchName, value: string) {
 
 /** The operator's one-line radio report on a finished turn, from a small model. */
 async function operatorReport($: EngineInterface, answer: string, turnId: string) {
-  const r = await $.model.complete({ model: 'haiku', system: OPERATOR_SYSTEM, prompt: answer, maxTokens: 60, effort: 'low', timeoutMs: 10000 })
-  if (!r.isAnswered || statusLine.turnId !== turnId) return
+  const r = await $.model.complete({ model: 'haiku', system: OPERATOR_SYSTEM, prompt: answer, maxTokens: 60, effort: 'low', timeoutMs: 10000 }).catch(() => undefined)
+  if (!r?.isAnswered || statusLine.turnId !== turnId) return
   const line = r.text.replace(/\s+/g, ' ').trim().replace(/^["'“]+|["'”]+$/g, '').slice(0, 100)
   if (!line) return
   statusLine.operator = `Operator: ${line}`
@@ -531,7 +732,7 @@ const HELP = [
   '/matrix rows [on|off]: tool rows as green trace lines.',
   '/matrix sound [on|off]: sound for the jack-in and Agent Smith.',
   '/matrix voice [on|off]: "Mister Anderson." when an Agent Smith deploys (needs sound on).',
-  '/construct: the operator console.',
+  '/construct: the operator console. Click a trace line to open it, and [ORACLE] for a prophecy (a small model call).',
 ].join('\n')
 
 export const register: Register = on => {
@@ -545,6 +746,21 @@ export const register: Register = on => {
       $.store.get('isSound'),
       $.store.get('isVoice'),
     ])
+    // Life in the Matrix: the stored totals, and this session counted once (a reload is the same session).
+    const [storedLife, seenSessions] = await Promise.all([$.store.get('lifetime'), $.store.get('seenSessions')])
+    let sessionId = ''
+    try {
+      sessionId = await $.session.id()
+    } catch {
+      // No id to tell this session from the last: count none.
+    }
+    const seenIds = Array.isArray(seenSessions) ? (seenSessions as unknown[]).filter((v): v is string => typeof v === 'string') : []
+    if (sessionId && !seenIds.includes(sessionId)) {
+      life.pending = addLife(life.pending, { sessions: 1 })
+      life.isDirty = true
+      await $.store.set('seenSessions', [...seenIds, sessionId].slice(-20))
+    }
+    await update($, lifetime, () => addLife(lifeOf(storedLife), life.pending))
     const restore = (value: unknown) => (was: boolean) => (typeof value === 'boolean' ? value : was)
     await Promise.all([
       update($, isOn, restore(saved)),
@@ -571,6 +787,9 @@ export const register: Register = on => {
     timers.ticker?.cancel()
     timers.rain?.cancel()
     timers.boot?.cancel()
+    timers.life?.cancel()
+    timers.life = $.clock.every(LIFE_FLUSH_MS, () => void flushLife($))
+    refreshZion($)
     timers.boot = $.clock.after(BOOT_MS, () => void update($, isBooting, () => false))
     // The jack-in's sound, off the session's own dispatch so start never waits for it.
     if (saved !== false) $.clock.after(1, () => void playSound($, 'sounds/boot.wav'))
@@ -583,13 +802,16 @@ export const register: Register = on => {
         tools.isBullet = true
         void update($, isBulletTime, () => true)
         void update($, stats, s => ({ ...s, bulletTimes: s.bulletTimes + 1 }))
+        void bumpLife($, { bulletTimes: 1 })
       }
       // Only the terminal's Rasters are pushed from here: a Client animates itself.
       for (const site of [band, construct]) {
         if (!site.id) continue
         site.f += 1
         if (site.f % crawlOf(site.isWorking, site.overlay) === 0) site.t += 1
-        const cells = site === construct ? constructCells(site) : rain(site.columns, site.rows, site.t, site.f, site.isWorking, site.overlay, bootField(site))
+        site.sentinels = nextSentinels(site.sentinels, site.failures, site.overlay.sentinels ?? 0)
+        site.failures = site.overlay.sentinels ?? 0
+        const cells = site === construct ? constructCells(site) : rain(site.columns, site.rows, site.t, site.f, site.isWorking, site.overlay, fieldOf(site))
         void $.ui.blit({ requestId: site.id, key: site.key, cells })
       }
     })
@@ -619,6 +841,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'construct' }, async $ => {
     await $.ui.open({ id: CONSTRUCT, title: '◢ The Construct' })
+    refreshZion($, 1)
 
     return { text: 'Loading the Construct.' }
   })
@@ -717,7 +940,7 @@ export const register: Register = on => {
         isWorking: e.props.isWorking,
       })
 
-      return <Raster key="rain" columns={band.columns} rows={band.rows} cells={rain(band.columns, band.rows, band.t, band.f, band.isWorking, overlay, bootField(band))} />
+      return <Raster key="rain" columns={band.columns} rows={band.rows} cells={rain(band.columns, band.rows, band.t, band.f, band.isWorking, overlay, fieldOf(band))} />
     }
     if (e.surface !== 'desktop') return next(e)
     // A Client region keeps animating across redraws, where an SVG frame was
@@ -731,14 +954,19 @@ export const register: Register = on => {
   // decoding inside it, and controls a click (or a key, on the terminal) flips.
   on('ui.render', { component: 'Pane', requestId: CONSTRUCT }, async ($, e) => {
     construct.id = '' // set again below while a terminal Raster shows
+    // The pane's own height: the surface's whole height counts rows a pane
+    // sharing its column (the desktop's browser, say) does not have.
+    const body = e.props.scroll?.bodyRows ?? 0
+    const rows = Math.max(CONSTRUCT_ROWS, Math.min(80, body > 0 ? body : (e.viewport?.rows ?? 40) - 2))
     const overlay = await readOverlay($)
-    const data = await constructData($, overlay)
-    const rows = Math.max(CONSTRUCT_ROWS, Math.min(80, (e.viewport?.rows ?? 40) - 2))
+    const data = await constructData($, overlay, rows)
 
     if (e.surface === 'desktop') {
       const { Client } = $.ui.resolve(e)
       return <Client key="construct-rain" module="./rain-client.tsx" props={{ rows, isWorking: true, overlay, construct: data }} width="100%" height={rows} />
     }
+    // Only the desktop opens a trace line: elsewhere its detail stays out of the readout.
+    const closed = { ...data, trace: data.trace.map(t => ({ ...t, detail: undefined })) }
     const { Box, Text, Button } = $.ui.resolve(e)
     const controls = (
       <Box flexDirection="row" flexWrap="wrap" gap={1}>
@@ -753,9 +981,9 @@ export const register: Register = on => {
         id: e.requestId,
         overlay,
         columns: Math.min(512, Math.max(1, e.props.bodyColumns)),
-        rows: rows - 2,
+        rows: Math.max(4, rows - buttonRows(data, e.props.bodyColumns)),
         dataF: construct.data?.now === data.now ? construct.dataF : construct.f,
-        data,
+        data: closed,
       })
 
       return (
@@ -771,7 +999,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         <Svg source={rainSvg(1600, 160, overlay)} alt="The Construct: a wall of green code rain" height={160} isInteractive />
-        {layoutConstruct(80, 60, data, data.now)
+        {layoutConstruct(80, 60, closed, data.now)
           .filter(line => !line.action)
           .map(line => <Text color={colorName(line.color)}>{line.text}</Text>)}
         {controls}
@@ -783,8 +1011,10 @@ export const register: Register = on => {
   on('ui.message', async ($, e, next) => {
     if (e.element !== 'construct-rain') return next(e)
     const action = (e.data as { action?: ConstructAction } | null)?.action
-    const isValid = action !== undefined &&
-      ('pill' in action ? action.pill === 'red' || action.pill === 'blue' : (SWITCH_NAMES as readonly string[]).includes(action.toggle))
+    const isValid = action !== undefined && (
+      'pill' in action ? action.pill === 'red' || action.pill === 'blue'
+      : 'oracle' in action ? action.oracle === true
+      : 'toggle' in action && (SWITCH_NAMES as readonly string[]).includes(action.toggle))
     if (isValid) await act($, action)
     return {}
   })
@@ -828,20 +1058,36 @@ export const register: Register = on => {
       update($, stats, s => ({ ...s, calls: s.calls + 1, tools: { ...s.tools, [e.tool]: (s.tools[e.tool] ?? 0) + 1 } })),
       update($, traceLog, log => [...log, entry].slice(-TRACE_KEEP)),
       agentId ? update($, smithRoster, roster => roster.map(r => (r.id === agentId ? { ...r, calls: r.calls + 1 } : r))) : undefined,
+      bumpLife($, { calls: 1 }),
     ])
     let ok = false
+    let failed = false
+    let output = ''
     try {
       const ran = await next(e)
       ok = ran.deny === undefined && ran.isError !== true
-      // A failed call is a glitch in the Matrix: déjà vu.
-      if (ran.deny === undefined && ran.isError === true) {
+      failed = ran.deny === undefined && ran.isError === true
+      output = ran.deny ?? ran.text ?? ''
+      // A failed call is a glitch in the Matrix: déjà vu, and a Sentinel sent through the rain.
+      if (failed) {
         glitchState.frames = GLITCH_FRAMES
-        await Promise.all([update($, isGlitching, () => true), update($, stats, s => ({ ...s, failures: s.failures + 1 }))])
+        await Promise.all([
+          update($, isGlitching, () => true),
+          update($, stats, s => ({ ...s, failures: s.failures + 1 })),
+          update($, sentinels, n => n + 1),
+          bumpLife($, { failures: 1 }),
+        ])
       }
       return ran
     } finally {
       const ms = (await $.clock.now()) - at
-      await update($, traceLog, log => log.map(t => (t.id === entry.id ? { ...t, ms, ok } : t)))
+      const input = e as Record<string, unknown>
+      const repeat = failed ? repeatOf(await read($, traceLog), entry) : 1
+      const detail = detailOf(input, output)
+      await update($, traceLog, log => log.map(t => (t.id === entry.id ? { ...t, ms, ok, detail, ...(repeat >= 2 ? { repeat } : {}) } : t)))
+      if (repeat === 3) $.ui.toast(`Déjà vu: ${who}${e.tool} ${entry.summary} has failed 3 times in a row.`)
+      if (ok) await openDoor($, e.tool, input)
+      if (ZION_TOOLS.has(e.tool)) refreshZion($)
       tools.running -= 1
       if (tools.running === 0) {
         renderStatus($) // back to how the last turn went
@@ -865,6 +1111,7 @@ export const register: Register = on => {
         update($, smithRoster, roster =>
           [...roster.filter(r => r.doneAt === undefined || since - r.doneAt < SMITH_KEEP_MS), smith].slice(-8)),
         update($, stats, s => ({ ...s, smiths: (s.smiths ?? 0) + 1 })),
+        bumpLife($, { smiths: 1 }),
       ])
       $.ui.toast(`Agent Smith deployed: ${e.description}`)
       // The band announces him, and the rain replicates him, for a few seconds.
@@ -889,6 +1136,7 @@ export const register: Register = on => {
       return r
     }
     if (!(await read($, isOn))) return r
+    await bumpLife($, { ms: e.durationMs })
     Object.assign(statusLine, { turnId: e.turnId, done: doneLine(e.turnId, e.durationMs), operator: '' })
     renderStatus($)
     if (!e.isAborted && e.answer.trim() && (await read($, isOperator))) {

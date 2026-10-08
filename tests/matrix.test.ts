@@ -1,8 +1,8 @@
 import type { RenderElement } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { decode, lookalike, rain, rainSvg, toolSummary } from '../hooks/register'
-import { phraseAt, rainGrid, spansOf, thinRain } from '../hooks/rain-core'
+import { decode, detailOf, lookalike, parseZion, rain, rainSvg, repeatOf, toolSummary } from '../hooks/register'
+import { SENTINEL_FRAMES, nextSentinels, phraseAt, rainGrid, spansOf, thinRain } from '../hooks/rain-core'
 import { actionAt, layoutConstruct, paintConstruct } from '../hooks/construct-core'
 
 const PROMPT = {
@@ -297,7 +297,7 @@ test('a subagent is an Agent Smith: announced, counted and named on its spinner'
     const { Text } = $.ui.resolve(e)
     return h(Text, {}, `engine: ${(e.props as { word: string }).word}`) as RenderElement
   })
-  await $.agent.spawn({ prompt: 'look around', description: 'find the bug', subagentType: 'Explore' })
+  await $.agent.spawn({ prompt: 'look around', description: 'find the bug', subagentType: 'Explore' } as never)
   expect(toasts).toContain('Agent Smith deployed: find the bug')
   const spinner = await $.ui.mount({
     plugin: 'matrix-skin', surface: 'desktop', component: 'Spinner', requestId: 'smith-1',
@@ -392,7 +392,7 @@ test('a spawn puts its task in the band for a few seconds', async ($, on) => {
   const clock = mock.clock(on, { now: 0 })
   on('ui.toast', () => ({ value: undefined }) as never)
   on('agent.spawn', () => ({ model: 'haiku', agentId: 'smith-2' }) as never)
-  await $.agent.spawn({ prompt: 'look around', description: 'find the bug', subagentType: 'Explore' })
+  await $.agent.spawn({ prompt: 'look around', description: 'find the bug', subagentType: 'Explore' } as never)
   expect((await bandOverlay($ as never)).smith).toBe('find the bug')
   await clock.advance(4000)
   expect((await bandOverlay($ as never)).smith).toBe('')
@@ -443,12 +443,12 @@ test('an Agent Smith deploys with his sound, once for several at once, and his v
   const heard = listen(on as never)
   on('ui.toast', () => ({ value: undefined }) as never)
   on('agent.spawn', () => ({ model: 'haiku', agentId: `smith-${Math.random()}` }) as never)
-  for (const description of ['one', 'two', 'three']) await $.agent.spawn({ prompt: 'x', description, subagentType: 'Explore' })
+  for (const description of ['one', 'two', 'three']) await $.agent.spawn({ prompt: 'x', description, subagentType: 'Explore' } as never)
   await clock.advance(10)
   expect(heard).toEqual(['sounds/smith.wav']) // the voice is off by default
   expect((await $.command.run({ ...MATRIX, args: 'voice on' })).text).toMatch(/Voice on/)
   await clock.advance(6000)
-  await $.agent.spawn({ prompt: 'x', description: 'four', subagentType: 'Explore' })
+  await $.agent.spawn({ prompt: 'x', description: 'four', subagentType: 'Explore' } as never)
   await clock.advance(10)
   expect(heard).toEqual(['sounds/smith.wav', 'sounds/smith.wav', 'say: Mister Anderson.'])
 })
@@ -460,7 +460,7 @@ test('/matrix sound off keeps the plugin silent, and a missing player is no erro
   on('ui.toast', () => ({ value: undefined }) as never)
   on('agent.spawn', () => ({ model: 'haiku', agentId: 'smith-quiet' }) as never)
   expect((await $.command.run({ ...MATRIX, args: 'sound off' })).text).toMatch(/Sound off/)
-  await $.agent.spawn({ prompt: 'x', description: 'quiet', subagentType: 'Explore' })
+  await $.agent.spawn({ prompt: 'x', description: 'quiet', subagentType: 'Explore' } as never)
   await clock.advance(10)
   expect(heard).toEqual([])
 })
@@ -474,7 +474,7 @@ test('a machine with no audio player still deploys Smith without an error', asyn
     return { value: undefined } as never
   })
   on('agent.spawn', () => ({ model: 'haiku', agentId: 'smith-mute' }) as never)
-  await $.agent.spawn({ prompt: 'x', description: 'mute', subagentType: 'Explore' })
+  await $.agent.spawn({ prompt: 'x', description: 'mute', subagentType: 'Explore' } as never)
   await clock.advance(10)
   expect(toasts).toContain('Agent Smith deployed: mute')
 })
@@ -486,7 +486,7 @@ test('on Windows the sounds and the voice go through the built-in player and syn
   on('ui.toast', () => ({ value: undefined }) as never)
   on('agent.spawn', () => ({ model: 'haiku', agentId: 'smith-win' }) as never)
   await $.command.run({ ...MATRIX, args: 'voice on' })
-  await $.agent.spawn({ prompt: 'x', description: 'windows', subagentType: 'Explore' })
+  await $.agent.spawn({ prompt: 'x', description: 'windows', subagentType: 'Explore' } as never)
   await clock.advance(10)
   expect(heard.length).toBe(2)
   expect(heard[0]).toContain('Media.SoundPlayer')
@@ -506,6 +506,11 @@ const DATA = {
   ],
   smiths: [{ id: 's1', task: 'find the bug', since: Date.UTC(2026, 9, 8, 9, 29, 18), calls: 7 }],
   switches: { isOn: true, sound: true, voice: false, rows: true, operator: true, morpheus: false },
+  zion: { isRepo: true, branch: 'main', ahead: 2, behind: 0, changed: 3 },
+  doors: [{ path: 'hooks/register.tsx', reads: 4, edits: 2 }],
+  doorCount: 1,
+  oracle: null,
+  lifetime: { ms: 7_380_000, calls: 3204, failures: 40, smiths: 12, bulletTimes: 9, sessions: 14 },
 } as const
 
 test('the Construct lays out its readout: title, trace log, roster and controls, all inside the pane', () => {
@@ -517,8 +522,12 @@ test('the Construct lays out its readout: title, trace log, roster and controls,
   expect(text).toMatch(/✖\s+1\.2s Bash  npm test/)
   expect(text).toMatch(/◌\s+… SMITH › Grep  TODO/)
   expect(text).toContain('◢ find the bug  0:42  7 calls')
-  const controls = lines.filter(l => l.action).map(l => l.text)
-  expect(controls).toEqual(['[SOUND ●]', '[VOICE ○]', '[ROWS ●]', '[OPERATOR ●]', '[MORPHEUS ○]', '[BLUE PILL]'])
+  expect(text).toContain('ZION  main ↑2 · 3 changed')
+  expect(text).toContain('LIFE  2h 3m jacked in · 3,204 calls · 14 sessions')
+  expect(text).toContain('◢ THE KEYMAKER · 1 door opened')
+  expect(text).toMatch(/R4\s+E2\s+hooks\/register\.tsx/)
+  const controls = lines.filter(l => l.action && !('expand' in l.action)).map(l => l.text)
+  expect(controls).toEqual(['[SOUND ●]', '[VOICE ○]', '[ROWS ●]', '[OPERATOR ●]', '[MORPHEUS ○]', '[ORACLE]', '[BLUE PILL]'])
   expect(lines.every(l => l.y >= 0 && l.y < 30 && l.x + Array.from(l.text).length <= 60)).toBe(true)
   // A click on a control finds its action.
   const voice = lines.find(l => l.text === '[VOICE ○]')!
@@ -569,4 +578,201 @@ test('the rain keeps under its glyph budget, dropping the dimmest glyphs first',
   thinRain(grid, 100)
   expect(lit().length).toBe(100)
   expect(Math.max(...lit().map(c => (c >> 8) & 0xff))).toBe(brightest) // the heads survive
+})
+
+const ENTRY = (n: number, ok: boolean, more: object = {}) => ({
+  id: `t${n}`, at: DATA.now - (60 - n) * 1000, tool: 'Bash', summary: `step ${n}`, who: '', ms: 100, ok, detail: [`$ step ${n}`, `out ${n}`], ...more,
+})
+
+test('a short pane keeps its header and controls, drops the lowest blocks first, and keeps the newest calls', () => {
+  const data = { ...DATA, trace: Array.from({ length: 30 }, (_, n) => ENTRY(n, true)) }
+  const lines = layoutConstruct(60, 16, data as never, DATA.now)
+  const text = lines.map(l => l.text).join('\n')
+  expect(lines.every(l => l.y < 16)).toBe(true)
+  expect(text).toContain('◢ THE CONSTRUCT')
+  expect(text).toContain('[BLUE PILL]') // the controls never fall off the bottom
+  expect(text).toContain('step 29') // the newest call shows
+  expect(text).not.toContain('step 0 ')
+  expect(text).not.toContain('LIFE') // the lowest-ranked block went first
+  expect(text).not.toContain('KEYMAKER')
+  // A tall pane has room for everything.
+  const tall = layoutConstruct(60, 60, data as never, DATA.now).map(l => l.text).join('\n')
+  expect(tall).toContain('LIFE')
+  expect(tall).toContain('KEYMAKER')
+})
+
+test('a click on a trace line opens it: its command and the tail of its output, under it', () => {
+  const data = { ...DATA, trace: [ENTRY(1, true), ENTRY(2, false)] }
+  const closed = layoutConstruct(60, 40, data as never, DATA.now)
+  const line = closed.find(l => l.key === 'trace:t2')!
+  expect(actionAt(closed, { x: line.x + 3, y: line.y })).toEqual({ expand: 't2' })
+  expect(closed.some(l => l.key.startsWith('detail:'))).toBe(false)
+  const open = layoutConstruct(60, 40, data as never, DATA.now, 't2')
+  const details = open.filter(l => l.key.startsWith('detail:t2:')).map(l => l.text)
+  expect(details).toEqual(['│ $ step 2', '│ out 2'])
+  expect(open.find(l => l.key === 'detail:t2:0')!.y).toBe(open.find(l => l.key === 'trace:t2')!.y + 1)
+})
+
+test('an opened line shows the command, then the last lines of output, without escape codes', () => {
+  const output = ['one', 'two', '\x1b[31mthree\x1b[0m', '', 'four', 'five', 'six', 'seven'].join('\n')
+  expect(detailOf({ command: 'npm test' }, output)).toEqual(['$ npm test', 'three', 'four', 'five', 'six', 'seven'])
+  expect(detailOf({}, '')).toEqual(['(no output)'])
+})
+
+test('déjà vu: the same failing call counts its repeats until it succeeds', () => {
+  const call = (n: number, ok?: boolean) => ({ id: `d${n}`, at: n, tool: 'Bash', summary: 'npm test', who: '', ok })
+  const log = [call(1, false), { ...call(2, true), summary: 'ls' }, call(3, false)]
+  expect(repeatOf([...log, call(4)], call(4))).toBe(3)
+  expect(repeatOf([call(1, false), call(2, true), call(3)], call(3))).toBe(1) // a success ends the loop
+  expect(repeatOf([call(1, false), { ...call(2, false), who: 'SMITH › ' }, call(3)], call(3))).toBe(2) // a Smith's call is his own
+})
+
+test('three failures of one command: a déjà vu toast, the status line, and a Sentinel for each', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined } as never
+  })
+  on('tool.call', () => ({ result: { stdout: '' }, text: 'Error: 3 tests failed', isError: true }) as never)
+  for (const id of ['f1', 'f2', 'f3']) await $.tool.call({ tool: 'Bash', command: 'npm test', tool_use_id: id } as never)
+  expect(toasts).toContain('Déjà vu: Bash npm test has failed 3 times in a row.')
+  const ui = await $.ui.mount({
+    plugin: 'matrix-skin', surface: 'desktop', component: 'Pane', requestId: 'matrix-construct',
+    props: { title: 'The Construct', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  } as never)
+  const client = (await ui.find({ type: 'Client', key: 'construct-rain' })) as { props?: { props?: { overlay?: { sentinels?: number }; construct?: { status?: { text: string }; trace?: { repeat?: number; detail?: string[] }[] } } } }
+  await ui.unmount()
+  const props = client?.props?.props
+  expect(props?.overlay?.sentinels).toBe(3)
+  expect(props?.construct?.status?.text).toMatch(/^DÉJÀ VU  Bash npm test ×3/)
+  expect(props?.construct?.trace?.at(-1)?.repeat).toBe(3)
+  expect(props?.construct?.trace?.at(-1)?.detail).toEqual(['$ npm test', 'Error: 3 tests failed'])
+})
+
+test('a failed call sends a Sentinel across the rain; the first look sends none', () => {
+  expect(nextSentinels([], undefined, 5)).toEqual([]) // failures before the rain looked
+  const sent = nextSentinels([], 5, 6)
+  expect(sent.length).toBe(1)
+  let crossing = sent
+  for (let k = 0; k < SENTINEL_FRAMES; k++) crossing = nextSentinels(crossing, 6, 6)
+  expect(crossing).toEqual([]) // across and gone
+  // Midway, his eyes burn red in the rain.
+  const grid = rainGrid(60, 9, 0, 0, false, {}, { sentinels: [{ seed: 1, age: 20 }] })
+  const eyes = Array.from(grid.cp).map((cp, i) => ({ cp, fg: grid.fg[i]! })).filter(c => c.cp === 0x25cf)
+  expect(eyes.length).toBeGreaterThan(0)
+  expect(eyes.every(c => (c.fg >> 16) > ((c.fg >> 8) & 0xff))).toBe(true)
+})
+
+test('Zion reads the branch, its drift from the remote and what changed', () => {
+  expect(parseZion('## main...origin/main [ahead 2, behind 1]\n M a.ts\n?? b.ts\n')).toEqual({ isRepo: true, branch: 'main', ahead: 2, behind: 1, changed: 2 })
+  expect(parseZion('## No commits yet on trunk\n')).toEqual({ isRepo: true, branch: 'trunk', ahead: 0, behind: 0, changed: 0 })
+  expect(parseZion('## HEAD (no branch)\r\n')).toMatchObject({ branch: 'detached' })
+})
+
+test('Zion runs git after a call that can change the working copy', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  const runs: string[] = []
+  on('process.run', ($, e) => {
+    runs.push(e.argv.join(' '))
+    return { value: { exitCode: 0, stdout: '## dev...origin/dev [behind 4]\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  on('tool.call', () => ({ result: {}, text: 'ok', isError: false }) as never)
+  await $.tool.call({ tool: 'Edit', file_path: 'C:\\work\\app\\src\\main.ts', tool_use_id: 'e1' } as never)
+  await $.tool.call({ tool: 'Read', file_path: 'C:\\work\\app\\src\\main.ts', tool_use_id: 'r1' } as never)
+  expect(runs).toEqual([]) // it waits for the burst to settle
+  await clock.advance(2000)
+  expect(runs).toEqual(['git status --porcelain=v1 --branch'])
+  const ui = await $.ui.mount({
+    plugin: 'matrix-skin', surface: 'desktop', component: 'Pane', requestId: 'matrix-construct',
+    props: { title: 'The Construct', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  } as never)
+  const client = (await ui.find({ type: 'Client', key: 'construct-rain' })) as { props?: { props?: { construct?: { zion?: object; doors?: object[]; doorCount?: number } } } }
+  await ui.unmount()
+  const data = client?.props?.props?.construct
+  expect(data?.zion).toEqual({ isRepo: true, branch: 'dev', ahead: 0, behind: 4, changed: 0 })
+  // The Keymaker counts the file once per read and once per edit, by its last two parts.
+  expect(data?.doors).toEqual([{ path: 'src/main.ts', reads: 1, edits: 1 }])
+  expect(data?.doorCount).toBe(1)
+})
+
+test('the Oracle control asks a small model, and her answer reaches the Construct', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  const asked: string[] = []
+  on('model.complete', ($, e) => {
+    asked.push(e.prompt as string)
+    return { value: { isAnswered: true, text: '"The test you keep running is not the test that is failing."', usage: {} } } as never
+  })
+  const mount = (surface: 'desktop' | 'terminal') => $.ui.mount({
+    plugin: 'matrix-skin', surface, component: 'Pane', requestId: 'matrix-construct',
+    props: { title: 'The Construct', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  } as never)
+  const oracleOf = async () => {
+    const ui = await mount('desktop')
+    const client = (await ui.find({ type: 'Client', key: 'construct-rain' })) as { props?: { props?: { construct?: { oracle?: { text: string; isConsulting: boolean } | null } } } }
+    await ui.unmount()
+    return client?.props?.props?.construct?.oracle
+  }
+  expect(await oracleOf()).toBeNull()
+  // [ORACLE], the sixth control: a key on the terminal, a click on the desktop.
+  const terminal = await mount('terminal')
+  await terminal.press({ key: 'control-5' })
+  await terminal.unmount()
+  expect((await oracleOf())?.isConsulting).toBe(true)
+  await clock.advance(50)
+  expect(await oracleOf()).toMatchObject({ text: 'The test you keep running is not the test that is failing.', isConsulting: false })
+  expect(asked.length).toBe(1)
+})
+
+test('life in the Matrix: calls and turns add up, are stored, and a reload is not a new session', async ($, on) => {
+  const saved = new Map<string, unknown>()
+  on('store.get', ($, e) => ({ value: saved.get(e.key) }) as never)
+  on('store.set', ($, e) => {
+    saved.set(e.key, JSON.parse(JSON.stringify(e.value)))
+    return { value: undefined } as never
+  })
+  const clock = mock.clock(on, { now: 1_000 })
+  on('command.register', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', ($, e) => e as never)
+  on('session.id', () => ({ value: 'session-a' }) as never)
+  on('process.run', () => ({ value: { exitCode: 128, stdout: '', stderr: 'not a git repository' } }) as never)
+  on('tool.call', () => ({ result: {}, text: 'ok', isError: false }) as never)
+  on('turn.complete', ($, e) => ({ text: e.answer }) as never)
+  on('model.complete', () => ({ value: { isAnswered: true, text: 'Neo listed the files.', usage: {} } }) as never)
+  const start = () => $.session.start({ source: 'startup', cwd: '/tmp', surface: 'desktop', isInteractive: true } as never)
+  await start()
+  await $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'l1' } as never)
+  await $.turn.complete({ answer: 'done', durationMs: 90_000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+  await clock.advance(16_000)
+  expect(saved.get('lifetime')).toMatchObject({ calls: 1, ms: 90_000, sessions: 1 })
+  await start() // a reload: the same session
+  await clock.advance(16_000)
+  expect(saved.get('lifetime')).toMatchObject({ calls: 1, sessions: 1 })
+})
+
+test('the Construct sizes itself to the pane, not the whole window', async ($, on) => {
+  mock.clock(on)
+  const ui = await $.ui.mount({
+    plugin: 'matrix-skin', surface: 'desktop', component: 'Pane', requestId: 'matrix-construct',
+    viewport: { columns: 200, rows: 70 },
+    props: { title: 'The Construct', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 26 }, view: {} },
+  } as never)
+  const client = (await ui.find({ type: 'Client', key: 'construct-rain' })) as { props?: { height?: number; props?: { rows?: number } } }
+  await ui.unmount()
+  expect(client?.props?.height).toBe(26)
+  expect(client?.props?.props?.rows).toBe(26)
+})
+
+test('a long prophecy wraps onto as many rows as a narrow pane needs, and is cut only past six', () => {
+  const text = 'You keep knocking on the same door, that access request fails, yet you circle back to docs and memory files instead of waiting for the key.'
+  const rows = (oracleText: string) =>
+    layoutConstruct(48, 60, { ...DATA, oracle: { text: oracleText, at: DATA.now, isConsulting: false } } as never, DATA.now)
+      .filter(l => l.key.startsWith('oracle:')).map(l => l.text)
+  const shown = rows(text)
+  expect(shown.length).toBeGreaterThan(3)
+  expect(shown.join(' ')).toBe(text) // every word, none cut
+  const long = rows(`${text} ${text} ${text}`)
+  expect(long.length).toBe(6)
+  expect(long.at(-1)!.endsWith('…')).toBe(true)
 })

@@ -26,6 +26,44 @@ export type MatrixTraceEntry = {
   ms?: number
   /** Whether it succeeded; absent while it runs. */
   ok?: boolean
+  /** Its full command and the tail of its output, a few lines, shown when the line is opened; absent while it runs. */
+  detail?: string[]
+  /** How many times in a row this same call has failed, this one counted: a déjà vu loop. Absent below 2. */
+  repeat?: number
+}
+
+/** The git state of the session's working copy: Zion. */
+export type MatrixZion = {
+  /** False outside a git repository, or where git could not be run. */
+  isRepo: boolean
+  branch: string
+  ahead: number
+  behind: number
+  /** Files changed, staged or untracked. */
+  changed: number
+}
+
+/** A file the session opened: one of the Keymaker's doors. */
+export type MatrixDoor = { path: string; reads: number; edits: number }
+
+/** The Oracle's last word on the session. */
+export type MatrixOracle = {
+  text: string
+  /** When the Oracle was consulted, in epoch ms. */
+  at: number
+  /** True while she is still thinking it over. */
+  isConsulting: boolean
+}
+
+/** Totals across every session, kept in the plugin's store: life in the Matrix. */
+export type MatrixLifetime = {
+  /** Time Claude spent working on main turns, in ms. */
+  ms: number
+  calls: number
+  failures: number
+  smiths: number
+  bulletTimes: number
+  sessions: number
 }
 
 /** One subagent in the Construct's Agent Smith roster. */
@@ -74,6 +112,16 @@ declare module 'claude-code' {
       isSound: boolean
       /** "Mister Anderson." spoken when an Agent Smith deploys. */
       isVoice: boolean
+      /** Failed calls this session: each one sends a Sentinel through the rain. */
+      sentinels: number
+      /** The working copy's git state; null until first read. */
+      zion: MatrixZion | null
+      /** The files opened this session, most touched first. */
+      doors: MatrixDoor[]
+      /** The Oracle's last word; null until she is consulted. */
+      oracle: MatrixOracle | null
+      /** Totals across every session, as last stored plus this session's since. */
+      lifetime: MatrixLifetime
     }
   }
 }

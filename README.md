@@ -20,7 +20,11 @@ A Matrix look for Claude Code.
   shows "◢ TRACE  Bash". A tool that runs past four seconds drops the band
   into bullet time: the rain crawls and the spinner says "Dodging bullets".
 - When a tool fails, the Matrix glitches: for a couple of seconds the rain
-  turns red and "Déjà vu." shudders in the band.
+  turns red and "Déjà vu." shudders in the band, and a Sentinel (a head of red
+  eyes trailing tentacles) swims across the rain.
+- When the same call fails again and again, that is a real déjà vu. Its trace
+  line glitches, the Construct's status reads `DÉJÀ VU  Bash npm test ×3`, and
+  on the third failure a toast says Claude is going in circles.
 - Tool rows read as green trace lines: `◢ Bash › npm test`, red when a call
   failed. Rows whose body matters (edits, checklists, questions) keep their
   normal look.
@@ -31,11 +35,25 @@ A Matrix look for Claude Code.
 - After each turn the status line says how it went ("◢ Jacked out after
   12s"). Then the Operator radios in a one-line report that a small model writes.
 - `/construct` opens the Construct: a pane that is all rain, with the
-  operator's readout decoding inside it. It shows a status line, a live trace
-  log of tool calls (time, ✓ or ✖, duration, what ran), the Agent Smith roster
-  (each task, time in the Matrix and calls) and controls. Click a control,
-  such as `[SOUND ●]` or `[BLUE PILL]`, to flip it. In the terminal, press its
-  number. When a line changes, only the changed characters decode again.
+  operator's readout decoding inside it. When a line changes, only the changed
+  characters decode again. The readout fits the pane's height; when the pane
+  is short, the least important blocks give way first. It shows:
+  - **Status and counters**: what the operator sees now, and the session's
+    calls, glitches, bullet times and Smiths.
+  - **Zion**: the git state of the working folder, such as
+    `ZION  main ↑2 · 3 changed`, read again after each call that can change it.
+  - **Life in the Matrix**: totals across every session: time Claude spent
+    working, calls, sessions and Smiths.
+  - **The Oracle**: click `[ORACLE]` and a small model reads the trace log and
+    gives a one-line prophecy about how the work is going.
+  - **Trace log**: one line per tool call (time, ✓ or ✖, duration, what ran).
+    In the desktop app, click a line to open it: the full command and the last
+    lines of its output. Click it again to close it.
+  - **The Keymaker**: the files Claude opened most, with read and edit counts
+    (`R3  E4   src/auth.ts`).
+  - **Agent Smiths**: each running subagent's task, time in the Matrix and calls.
+  - **Controls**: click `[SOUND ●]`, `[ORACLE]`, `[BLUE PILL]` and the rest. In
+    the terminal, press its number.
 - The footer's mode labels gain "◢ matrix" while the look is on.
 
 ## Commands
@@ -50,9 +68,11 @@ A Matrix look for Claude Code.
 | `/matrix sound [on\|off]` | Sound for the jack-in and Agent Smith (on by default) |
 | `/matrix voice [on\|off]` | "Mister Anderson." when an Agent Smith deploys (off by default; needs sound on) |
 | `/matrix help` | Lists these |
-| `/construct` | Opens the operator console |
+| `/construct` | Opens the operator console (each `[ORACLE]` click is one small model call) |
 
-The plugin remembers every choice across sessions.
+The plugin remembers every choice, and the lifetime totals, across sessions.
+Zion runs `git status` in the session's folder; outside a repository it reads
+"offline".
 
 ## Install
 
@@ -66,7 +86,7 @@ In Claude Code (terminal or the desktop app's Code tab):
 Then start a new session, or reload plugins. Type `/matrix` to choose your pill.
 
 It needs a recent Claude Code with plugin hook modules (built and tested on
-2.1.286). To try it from a clone without installing:
+2.1.289). To try it from a clone without installing:
 `claude --plugin-dir /path/to/matrix-skin`
 
 macOS plays the sounds and the voice through Claude Code's own player. On

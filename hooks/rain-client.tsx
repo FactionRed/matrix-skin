@@ -1,15 +1,16 @@
 // The desktop's code rain: a Client region the engine keeps alive across the
 // plugin's redraws, so the rain never blinks out when the hooks module draws
 // again. It animates on the surface's own frame clock, and the pointer parts
-// the code around it; a click sends a ring of light through the rain. Given a
-// Construct readout, it decodes the readout's lines into the rain, and a click
-// on a control posts the control's action to the hooks module.
+// the code around it; a click sends a ring of light through the rain, and each
+// failed call a Sentinel. Given a Construct readout, it decodes the readout's
+// lines into the rain; a click on a trace line opens it, and a click on a
+// control posts the control's action to the hooks module.
 import type { ClientModule } from 'claude-code'
 
 import { actionAt, layoutConstruct, paintConstruct } from './construct-core'
 import type { ConstructData, ConstructLine, DecodeMemory } from './construct-core'
-import { RAIN_MS, crawlOf, rainGrid, rowParts, thinRain } from './rain-core'
-import type { Overlay, Point, Region, Ripple } from './rain-core'
+import { RAIN_MS, crawlOf, nextSentinels, rainGrid, rowParts, thinRain } from './rain-core'
+import type { Overlay, Point, Region, Ripple, Sentinel } from './rain-core'
 
 type RainProps = { rows: number; isWorking: boolean; overlay: Overlay; construct?: ConstructData }
 
@@ -17,13 +18,17 @@ type RainState = {
   /**
    * Mutated in place, never redrawn for: the newest props for the frame
    * clock's tick, the readout's decode memory, the lines last drawn (to know
-   * what a click hit), and the frame the readout's data arrived on.
+   * what a click hit), the frame the readout's data arrived on, and the failed
+   * calls the rain has sent Sentinels for.
    */
-  live: { props: RainProps; memory: DecodeMemory; lines: ConstructLine[]; dataNow: number; dataF: number }
+  live: { props: RainProps; memory: DecodeMemory; lines: ConstructLine[]; dataNow: number; dataF: number; failures?: number }
   t: number
   f: number
   pointer: Point | null
   ripples: Ripple[]
+  sentinels: Sentinel[]
+  /** The trace line opened by a click, by its call's id. */
+  expanded?: string
   /** The frame the boot sequence began on; absent while it is not running. */
   bootF?: number
 }
@@ -41,9 +46,13 @@ const Rain: ClientModule<RainProps, RainState> = (props, surface) => {
       const s = surface.state
       if (!s) return
       const f = s.f + 1
+      const failures = s.live.props.overlay.sentinels ?? 0
+      const sentinels = nextSentinels(s.sentinels, s.live.failures, failures)
+      s.live.failures = failures
       surface.setState({
         ...s,
         f,
+        sentinels,
         bootF: s.live.props.overlay.isBooting ? (s.bootF ?? f) : undefined,
         t: f % crawlOf(s.live.props.isWorking, s.live.props.overlay) === 0 ? s.t + 1 : s.t,
         ripples: s.ripples.map(r => ({ ...r, age: r.age + 1 })).filter(r => r.age < RIPPLE_FRAMES),
@@ -56,11 +65,16 @@ const Rain: ClientModule<RainProps, RainState> = (props, surface) => {
       if (event.type === 'leave') surface.setState({ ...s, pointer: null })
       else if (event.type === 'down') {
         const action = actionAt(s.live.lines, at)
+        const ripples = [...s.ripples, { ...at, age: 0 }].slice(-6)
+        if (action && 'expand' in action) {
+          surface.setState({ ...s, pointer: at, ripples, expanded: s.expanded === action.expand ? undefined : action.expand })
+          return
+        }
         if (action) surface.post({ action })
-        surface.setState({ ...s, pointer: at, ripples: [...s.ripples, { ...at, age: 0 }].slice(-6) })
+        surface.setState({ ...s, pointer: at, ripples })
       } else if (event.type === 'move' || event.type === 'enter') surface.setState({ ...s, pointer: at })
     })
-    surface.setState({ live: { props, memory: new Map(), lines: [], dataNow: 0, dataF: 0 }, t: 0, f: 0, pointer: null, ripples: [] })
+    surface.setState({ live: { props, memory: new Map(), lines: [], dataNow: 0, dataF: 0 }, t: 0, f: 0, pointer: null, ripples: [], sentinels: [] })
   }
 
   const state = surface.state
@@ -81,7 +95,7 @@ const Rain: ClientModule<RainProps, RainState> = (props, surface) => {
   if (props.construct && state && !props.overlay.isBooting) {
     const live = state.live
     if (live.dataNow !== props.construct.now) Object.assign(live, { dataNow: props.construct.now, dataF: f })
-    live.lines = layoutConstruct(columns, rows, props.construct, live.dataNow + (f - live.dataF) * RAIN_MS)
+    live.lines = layoutConstruct(columns, rows, props.construct, live.dataNow + (f - live.dataF) * RAIN_MS, state.expanded)
     regions = paintConstruct(grid, live.lines, f, live.memory, state.pointer)
   }
   thinRain(grid, GLYPH_BUDGET, regions)

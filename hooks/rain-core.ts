@@ -18,6 +18,8 @@ export const DEJA_VU = 'Déjà vu.'
 export const RAIN_MS = 80
 /** How long the jack-in boot sequence runs, in frames (about 3.6s). */
 export const BOOT_FRAMES = 45
+/** How long a Sentinel takes to cross the rain, in frames (about 3.2s). */
+export const SENTINEL_FRAMES = 40
 
 // The boot sequence's lines, as the film opens.
 const BOOT_LINES = ['Call trans opt: received. 2-19-98 13:24:18 REC:Log>', 'Trace program: running']
@@ -40,16 +42,33 @@ const COLOR_NAME = new Map([...TRAIL, ...GLITCH_TRAIL].map(color => [hex(color),
 
 /**
  * What the rain shows over itself: the running tool, a glitch, bullet time,
- * the jack-in boot sequence, and an Agent Smith being deployed (his task).
+ * the jack-in boot sequence, an Agent Smith being deployed (his task), and
+ * the failed calls so far (each new one sends a Sentinel through the rain).
  */
-export type Overlay = { trace?: string; isGlitching?: boolean; isBulletTime?: boolean; isBooting?: boolean; smith?: string }
+export type Overlay = { trace?: string; isGlitching?: boolean; isBulletTime?: boolean; isBooting?: boolean; smith?: string; sentinels?: number }
 
 /** A position in a Client region, in cells. */
 export type Point = { x: number; y: number }
 /** A click's ring of light, `age` frames old. */
 export type Ripple = Point & { age: number }
-/** The pointer over a Client region, the ripples its clicks sent, and how far the boot sequence has run. */
-export type Field = { pointer?: Point | null; ripples?: Ripple[]; bootFrames?: number }
+/** A Sentinel sent through the rain by a failed call, `age` frames into its crossing. */
+export type Sentinel = { seed: number; age: number }
+/**
+ * The pointer over a Client region, the ripples its clicks sent, how far the
+ * boot sequence has run, and the Sentinels crossing.
+ */
+export type Field = { pointer?: Point | null; ripples?: Ripple[]; bootFrames?: number; sentinels?: Sentinel[] }
+
+/**
+ * The Sentinels a site's rain carries after a frame: each one a frame older,
+ * gone once across, and a new one for each failure since the site last looked.
+ * The first look only notes the count: failures before it sent nothing.
+ */
+export const nextSentinels = (sentinels: Sentinel[], seen: number | undefined, failures: number) => {
+  const aged = sentinels.map(s => ({ ...s, age: s.age + 1 })).filter(s => s.age < SENTINEL_FRAMES)
+  if (seen === undefined || failures <= seen) return aged
+  return [...aged, ...Array.from({ length: Math.min(3, failures - seen) }, (_, k) => ({ seed: hash(failures, k), age: -k * 6 }))].slice(-4)
+}
 
 /** One frame of rain: a code point, a color and a background (`-1`, the default) per cell, row-major. */
 export type Grid = { columns: number; rows: number; cp: Uint32Array; fg: Int32Array; bg: Int32Array }
@@ -146,6 +165,8 @@ export const rainGrid = (columns: number, rows: number, t: number, f = 0, isWork
     }
   }
 
+  for (const sentinel of field.sentinels ?? []) if (sentinel.age >= 0) paintSentinel(sentinel, columns, rows, f, set)
+
   const mid = Math.floor(rows / 2)
   const label = (text: string, color: number, scramble: (k: number) => boolean) => {
     const chars = Array.from(text)
@@ -186,6 +207,30 @@ export const rainGrid = (columns: number, rows: number, t: number, f = 0, isWork
   }
 
   return { columns, rows, cp, fg, bg }
+}
+
+/**
+ * A Sentinel: a head of red eyes swimming left to right across the rain, its
+ * tentacles trailing behind it and waving as it goes.
+ */
+const paintSentinel = (s: Sentinel, columns: number, rows: number, f: number, set: (x: number, y: number, ch: string, color: number) => void) => {
+  const LENGTH = 10
+  const hx = Math.round(-2 + (s.age / SENTINEL_FRAMES) * (columns + LENGTH + 4))
+  const lane = rows <= 3 ? Math.floor(rows / 2) : 1 + (s.seed % Math.max(1, rows - 2))
+  const hy = Math.round(lane + Math.sin(s.age / 4 + (s.seed % 7)) * Math.min(2, (rows - 1) / 2))
+  const strands = rows >= 7 ? [-2, -1, 0, 1, 2] : rows >= 3 ? [-1, 0, 1] : [0]
+  for (const strand of strands) {
+    for (let k = 1; k <= LENGTH; k++) {
+      const wave = Math.sin((s.age + k) * 0.9 + strand * 1.7) * 0.7
+      const y = Math.round(hy + strand * Math.min(1, k / 4) + wave)
+      const shade = Math.min(GLITCH_HEX.length - 1, 2 + Math.floor((k * 6) / LENGTH))
+      set(hx - 1 - k, y, glyph(k * 7 + strand, f + k, KATAKANA), GLITCH_HEX[shade]!)
+    }
+  }
+  // The head: a cluster of eyes, white-hot at the middle.
+  for (const [dx, dy] of [[0, 0], [-1, 0], [1, 0], ...(rows >= 5 ? [[0, -1], [0, 1]] : [])] as const) {
+    set(hx + dx, hy + dy, '●', dx === 0 && dy === 0 ? GLITCH_HEX[0]! : GLITCH_HEX[2]!)
+  }
 }
 
 /**
