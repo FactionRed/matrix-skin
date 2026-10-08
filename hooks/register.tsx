@@ -92,7 +92,16 @@ const ORACLE_SYSTEM = [
   'Plain text: no quotes, no emoji, no markdown.',
 ].join(' ')
 
-const isOn = atom({ plugin: 'matrix-skin', key: 'isOn' } as const, true)
+const ORACLE_ASK_SYSTEM = [
+  'You are the Oracle from The Matrix: warm, wry, unhurried, a little cryptic, and you see what is coming. A person',
+  'working with a coding assistant comes to your kitchen with a question. Answer it in your manner: the real answer,',
+  'or the truth they need to hear, through a Matrix metaphor or a knowing aside. Where the session notes bear on the',
+  'question, use them; where you cannot know, say so your way, never invent facts. Under 60 words.',
+  'Plain text: no quotes, no emoji, no markdown.',
+].join(' ')
+const ORACLE_OUT = 'The Oracle is not taking visitors right now. Come back later.'
+
+const isOn =atom({ plugin: 'matrix-skin', key: 'isOn' } as const, true)
 const frame = atom({ plugin: 'matrix-skin', key: 'frame' } as const, 0)
 const isGlitching = atom({ plugin: 'matrix-skin', key: 'isGlitching' } as const, false)
 const trace = atom({ plugin: 'matrix-skin', key: 'trace' } as const, '')
@@ -607,19 +616,35 @@ async function act($: EngineInterface, action: ConstructAction) {
   }
 }
 
-/** The Oracle's prophecy on the session so far, from a small model. */
-async function consultOracle($: EngineInterface) {
+/** The Oracle's word, from a small model: her answer to `question`, or asked nothing, her prophecy on the session. */
+async function askOracle($: EngineInterface, question = '') {
   const [log, roster, s, opened] = await Promise.all([read($, traceLog), read($, smithRoster), read($, stats), read($, doors)])
-  let text = 'The Oracle is not taking visitors right now. Come back later.'
+  const session = oraclePrompt(log, roster, s, opened)
+  const prompt = question ? `The question: ${question.slice(0, 1000)}\n\nSession notes, what the assistant has done:\n${session}` : session
   try {
-    const r = await $.model.complete({ model: 'haiku', system: ORACLE_SYSTEM, prompt: oraclePrompt(log, roster, s, opened), maxTokens: 120, effort: 'low', timeoutMs: 20000 })
-    const said = r.isAnswered ? r.text.replace(/\s+/g, ' ').trim().replace(/^["'“]+|["'”]+$/g, '').slice(0, 240) : ''
-    if (said) text = said
+    const r = await $.model.complete({
+      model: 'haiku',
+      system: question ? ORACLE_ASK_SYSTEM : ORACLE_SYSTEM,
+      prompt,
+      maxTokens: question ? 200 : 120,
+      effort: 'low',
+      timeoutMs: 20000,
+    })
+    // Her words draw as plain text: markdown's *emphasis* markers would show as they are.
+    const said = r.isAnswered ? r.text.replace(/(\*{1,2})(\S(?:[^*]*?\S)?)\1/g, '$2').replace(/\s+/g, ' ').trim().replace(/^["'“]+|["'”]+$/g, '').slice(0, question ? 480 : 240) : ''
+    if (said) return said
   } catch {
     // No answer: she is out.
   }
+  return ORACLE_OUT
+}
+
+/** The Oracle's prophecy on the session so far, put where the Construct shows it. */
+async function consultOracle($: EngineInterface) {
+  const text = await askOracle($)
   const at = await $.clock.now()
   await update($, oracle, () => ({ text, at, isConsulting: false }))
+  return text
 }
 
 /** Reads git again once a burst of calls settles: Zion's line. */
@@ -736,6 +761,7 @@ const HELP = [
   '/matrix sound [on|off]: sound for the jack-in and Agent Smith.',
   '/matrix voice [on|off]: "Mister Anderson." when an Agent Smith deploys (needs sound on).',
   '/construct: the operator console. Click a trace line to open it, and [ORACLE] for a prophecy (a small model call).',
+  '/oracle <question>: ask the Oracle; she answers in her own way. Asked nothing, she reads the session (a small model call).',
 ].join('\n')
 
 export const register: Register = on => {
@@ -784,6 +810,7 @@ export const register: Register = on => {
       update($, isBooting, () => saved !== false),
       $.command.register({ name: 'matrix', description: 'Red pill or blue pill; also /matrix morpheus, operator, rows (on|off), help' }),
       $.command.register({ name: 'construct', description: 'Open the Construct: a live operator console of the Matrix' }),
+      $.command.register({ name: 'oracle', description: 'Ask the Oracle a question; asked nothing, she reads the session', argumentHint: '[question]' }),
     ])
     // A visible sign the mod loaded in this session.
     $.ui.toast(saved === false ? 'Matrix skin loaded (off): type /matrix red to switch it on' : '◢ Matrix skin loaded. Wake up, Neo...')
@@ -847,6 +874,43 @@ export const register: Register = on => {
     refreshZion($, 1)
 
     return { text: 'Loading the Construct.' }
+  })
+
+  // The Oracle answers what you ask her; asked nothing, she reads the session,
+  // as the Construct's [ORACLE] does, and her word shows there too.
+  on('command.run', { command: 'oracle' }, async ($, e) => {
+    const question = e.args.trim()
+    if (question) return { text: await askOracle($, question) }
+    const word = await read($, oracle)
+    const at = await $.clock.now()
+    await update($, oracle, () => ({ text: word?.text ?? '', at, isConsulting: true }))
+
+    return { text: await consultOracle($) }
+  })
+
+  // Her answer: her name, dim, then her words decoding out of the rain. Her
+  // name replaces the `matrix-skin:` the engine puts before a plugin's output.
+  on('ui.render', { component: 'CommandOutput', props: { command: 'oracle' } }, async ($, e, next) => {
+    if (e.props.isErrored || !(await read($, isOn))) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const text = e.props.text.replace(/^matrix-skin:\s*/, '')
+    const isAnimating = await shouldAnimate($, e.requestId)
+    const { segments } = isAnimating
+      ? decode(text, await read($, memberOf(frame, e)), swapFor(e.surface))
+      : { segments: [{ kind: 'clear', text }] as Segment[] }
+
+    return (
+      <Box flexDirection="column">
+        <Text color={DARK}>◢ THE ORACLE</Text>
+        <Box flexShrink={1}>
+          <Text color={GREEN}>
+            {segments.map(s => (
+              <Text color={s.kind === 'clear' ? GREEN : s.kind === 'hot' ? HEAD : DARK} bold={s.kind === 'hot'}>{s.text}</Text>
+            ))}
+          </Text>
+        </Box>
+      </Box>
+    )
   })
 
   // Your prompts: a green `>` and green text that decodes out of the rain.

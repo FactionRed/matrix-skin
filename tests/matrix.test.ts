@@ -724,6 +724,37 @@ test('the Oracle control asks a small model, and her answer reaches the Construc
   expect(asked.length).toBe(1)
 })
 
+test('/oracle answers the question asked, and her answer decodes under her name', async ($, on) => {
+  mock.store(on)
+  const clock = mock.clock(on, { now: 0 })
+  const asked: { system: string; prompt: string }[] = []
+  on('model.complete', ($, e) => {
+    asked.push({ system: e.system as string, prompt: e.prompt as string })
+    return { value: { isAnswered: true, text: '"You already know the answer. You have not *run* the tests yet."', usage: {} } } as never
+  })
+  on('command.register', () => ({ value: undefined }) as never)
+  on('session.start', ($, e) => e as never)
+  await $.session.start({ source: 'startup', cwd: '/tmp', surface: 'terminal', isInteractive: true } as never)
+  await clock.advance(5000)
+  const answer = 'You already know the answer. You have not run the tests yet.'
+  expect((await $.command.run({ ...MATRIX, command: 'oracle', args: 'will my refactor work?' })).text).toBe(answer)
+  expect(asked[0]?.prompt).toMatch(/^The question: will my refactor work\?/)
+  expect(asked[0]?.system).toMatch(/comes to your kitchen with a question/)
+  const ui = await $.ui.mount({
+    plugin: 'matrix-skin', surface: 'terminal', requestId: 'o1', component: 'CommandOutput',
+    // The engine puts the plugin's name before its output; her own name replaces it.
+    props: { command: 'oracle', args: 'will my refactor work?', text: `matrix-skin: ${answer}`, isErrored: false },
+  } as never)
+  expect(await ui.find({ type: 'Text', text: /THE ORACLE/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^${answer}$`) })).toBeUndefined()
+  await clock.advance(3000)
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^${answer}$`) })).toBeDefined()
+  await ui.unmount()
+  // Asked nothing, she reads the session instead.
+  expect((await $.command.run({ ...MATRIX, command: 'oracle', args: '' })).text).toBe(answer)
+  expect(asked[1]?.system).toMatch(/one short prophecy/)
+})
+
 test('life in the Matrix: calls and turns add up, are stored, and a reload is not a new session', async ($, on) => {
   const saved = new Map<string, unknown>()
   on('store.get', ($, e) => ({ value: saved.get(e.key) }) as never)

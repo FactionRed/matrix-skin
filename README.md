@@ -55,6 +55,10 @@ with or endorsed by Warner Bros. (see [License](#license)).
   - **Agent Smiths**: each running subagent's task, time in the Matrix and calls.
   - **Controls**: click `[SOUND ●]`, `[ORACLE]`, `[BLUE PILL]` and the rest. In
     the terminal, press its number.
+- `/oracle` and a question: the Oracle answers it in her own way, warm and a
+  little cryptic, with what Claude has done this session in mind. Her answer
+  decodes out of the rain under her name. Asked nothing, she gives her
+  prophecy on the session, as the Construct's `[ORACLE]` does.
 - The footer's mode labels gain "◢ matrix" while the look is on.
 
 ## Commands
@@ -70,6 +74,7 @@ with or endorsed by Warner Bros. (see [License](#license)).
 | `/matrix voice [on\|off]` | "Mister Anderson." when an Agent Smith deploys (off by default; needs sound on) |
 | `/matrix help` | Lists these |
 | `/construct` | Opens the operator console (each `[ORACLE]` click is one small model call) |
+| `/oracle [question]` | Ask the Oracle a question; asked nothing, she reads the session (one small model call) |
 
 The plugin remembers every choice, and the lifetime totals, across sessions.
 Zion runs `git status` in the session's folder; outside a repository it reads
@@ -116,6 +121,8 @@ Everything it does outside its own code goes through Claude Code:
   Each `[ORACLE]` click in the Construct is one more Haiku call. It sends the
   last 20 tool calls (tool, command or path, and whether each failed), the
   running subagents' tasks and the most-opened files (last two path parts).
+  Each `/oracle` is one more Haiku call. It sends the same, plus the first
+  1,000 characters of your question.
 - **Processes.** `git status --porcelain=v1 --branch` runs in the session's
   folder after Bash and edit calls, and when `/construct` opens, for Zion. On
   Windows, which Claude Code has no audio player for, two fixed `powershell`
@@ -147,7 +154,8 @@ setting, and it starts no agents or tools of its own.
   the Operator's report (above).
 - `prompt.compose`: adds the Morpheus voice section while Morpheus mode is on,
   and changes nothing else.
-- `command.run`: answers its own `/matrix` and `/construct` commands only.
+- `command.run`: answers its own `/matrix`, `/construct` and `/oracle`
+  commands only.
 - `ui.render`, `ui.message`, `session.start`: draw the look, take clicks on
   the Construct's controls, and start the rain and the boot sequence.
 
